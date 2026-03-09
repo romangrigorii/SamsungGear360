@@ -60,6 +60,7 @@ void videoDecodeThread(const char* url) {
             std::cerr << "2. Test with: ffplay -i \"" << url << "\"" << std::endl;
             std::cerr << "3. Check network connectivity" << std::endl;
             av_dict_free(&opts);
+            g_streamOpenFailed = true;
             g_running = false;
             g_formatContext.store(nullptr);
             return;
@@ -72,6 +73,7 @@ void videoDecodeThread(const char* url) {
     
     if (avformat_find_stream_info(fmt, nullptr) < 0) {
         std::cerr << "Failed to find stream info" << std::endl;
+        g_streamOpenFailed = true;
         g_running = false;
         avformat_close_input(&fmt);
         g_formatContext.store(nullptr);

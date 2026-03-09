@@ -1,0 +1,16 @@
+# Gear 360 viewer stream config (edit to match your Pi relay)
+[stream]
+ip = "10.0.0.210"
+port = 7679
+path = "/livestream_high.avi"
+
+# Optional: external players for --ffplay and --gstreamer
+[external_player]
+# Path to ffplay (used for --ffplay; fallback when --gstreamer fails on Windows)
+# ffplay = "C:/vcpkg/installed/x64-windows/tools/ffmpeg/ffplay.exe"
+
+# GStreamer (used for --gstreamer): path to gst-launch-1.0 and queue/buffer options
+gst_launch = "C:/Program Files/GStreamer/1.0/msvc_x86_64/bin/gst-launch-1.0.exe"
+gst_queue_max_buffers = 1   # 1 = low latency; increase for smoother playback
+gst_queue_max_time_ms = 1  # max buffer time in ms (0 = no limit)
+gst_sync = false            # autovideosink sync (false = low latency)

@@ -184,76 +184,99 @@ endif()
 # Find GLFW and GLEW
 # ============================================================================
 
-if(USE_HOMEBREW)
-    find_library(GLFW_LIB
-        NAMES glfw
-        PATHS "${BREW_PREFIX}/opt/glfw/lib"
-        NO_DEFAULT_PATH
-    )
-    
-    find_library(GLEW_LIB
-        NAMES GLEW glew
-        PATHS "${BREW_PREFIX}/opt/glew/lib"
-        NO_DEFAULT_PATH
-    )
-    
-    if(GLFW_LIB)
-        set(GLFW_INCLUDE_DIR "${BREW_PREFIX}/opt/glfw/include")
-    endif()
-    
-    if(GLEW_LIB)
-        set(GLEW_INCLUDE_DIR "${BREW_PREFIX}/opt/glew/include")
-    endif()
-else()
-    # Try pkg-config first (Linux)
-    find_package(PkgConfig QUIET)
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(GLFW_PKG glfw3)
-        if(GLFW_PKG_FOUND)
-            set(GLFW_INCLUDE_DIR ${GLFW_PKG_INCLUDE_DIRS})
-            set(GLFW_LIB ${GLFW_PKG_LIBRARIES})
-        endif()
-    endif()
-    
-    # Manual search if pkg-config didn't find it
-    if(NOT GLFW_LIB)
-        find_library(GLFW_LIB 
-            NAMES glfw3 glfw
-            PATHS
-            "C:/vcpkg/installed/x64-windows/lib"
-            "C:/vcpkg/installed/x86-windows/lib"
-            "/usr/lib"
-            "/usr/local/lib"
+# Optional: use bundled GLFW from libs/glfw submodule (or libs/glfw-3.4; set GLFW_LOCAL_DIR to override)
+get_filename_component(_GLFW_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libs" ABSOLUTE)
+if(NOT GLFW_LOCAL_DIR OR NOT EXISTS "${GLFW_LOCAL_DIR}/CMakeLists.txt")
+  unset(GLFW_LOCAL_DIR CACHE)
+  if(EXISTS "${_GLFW_LIBS_DIR}/glfw/CMakeLists.txt")
+    set(GLFW_LOCAL_DIR "${_GLFW_LIBS_DIR}/glfw" CACHE PATH "Path to local GLFW source")
+  elseif(EXISTS "${_GLFW_LIBS_DIR}/glfw-3.4/CMakeLists.txt")
+    set(GLFW_LOCAL_DIR "${_GLFW_LIBS_DIR}/glfw-3.4" CACHE PATH "Path to local GLFW source")
+  endif()
+endif()
+set(GLFW_FOUND_LOCAL FALSE)
+if(GLFW_LOCAL_DIR AND EXISTS "${GLFW_LOCAL_DIR}/CMakeLists.txt")
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${GLFW_LOCAL_DIR}" "${CMAKE_BINARY_DIR}/glfw" EXCLUDE_FROM_ALL)
+    set(GLFW_INCLUDE_DIR "${GLFW_LOCAL_DIR}/include")
+    set(GLFW_FOUND_LOCAL TRUE)
+    message(STATUS "Using local GLFW: ${GLFW_LOCAL_DIR}")
+endif()
+
+if(NOT GLFW_FOUND_LOCAL)
+    if(USE_HOMEBREW)
+        find_library(GLFW_LIB
+            NAMES glfw
+            PATHS "${BREW_PREFIX}/opt/glfw/lib"
+            NO_DEFAULT_PATH
         )
-        find_path(GLFW_INCLUDE_DIR GLFW/glfw3.h
-            PATHS
-            "C:/vcpkg/installed/x64-windows/include"
-            "C:/vcpkg/installed/x86-windows/include"
-            "/usr/include"
-            "/usr/local/include"
-        )
-    endif()
-    
-    if(NOT GLEW_LIB)
-        find_library(GLEW_LIB 
+        
+        find_library(GLEW_LIB
             NAMES GLEW glew
-            PATHS
-            "C:/vcpkg/installed/x64-windows/lib"
-            "C:/vcpkg/installed/x86-windows/lib"
-            "/usr/lib"
-            "/usr/local/lib"
+            PATHS "${BREW_PREFIX}/opt/glew/lib"
+            NO_DEFAULT_PATH
         )
-        find_path(GLEW_INCLUDE_DIR GL/glew.h
-            PATHS
-            "C:/vcpkg/installed/x64-windows/include"
-            "C:/vcpkg/installed/x86-windows/include"
-            "/usr/include"
-            "/usr/local/include"
-        )
+        
+        if(GLFW_LIB)
+            set(GLFW_INCLUDE_DIR "${BREW_PREFIX}/opt/glfw/include")
+        endif()
+        
+        if(GLEW_LIB)
+            set(GLEW_INCLUDE_DIR "${BREW_PREFIX}/opt/glew/include")
+        endif()
+    else()
+        # Try pkg-config first (Linux)
+        find_package(PkgConfig QUIET)
+        if(PKG_CONFIG_FOUND)
+            pkg_check_modules(GLFW_PKG glfw3)
+            if(GLFW_PKG_FOUND)
+                set(GLFW_INCLUDE_DIR ${GLFW_PKG_INCLUDE_DIRS})
+                set(GLFW_LIB ${GLFW_PKG_LIBRARIES})
+            endif()
+        endif()
+        
+        # Manual search if pkg-config didn't find it
+        if(NOT GLFW_LIB)
+            find_library(GLFW_LIB 
+                NAMES glfw3 glfw
+                PATHS
+                "C:/vcpkg/installed/x64-windows/lib"
+                "C:/vcpkg/installed/x86-windows/lib"
+                "/usr/lib"
+                "/usr/local/lib"
+            )
+            find_path(GLFW_INCLUDE_DIR GLFW/glfw3.h
+                PATHS
+                "C:/vcpkg/installed/x64-windows/include"
+                "C:/vcpkg/installed/x86-windows/include"
+                "/usr/include"
+                "/usr/local/include"
+            )
+        endif()
+        
+        if(NOT GLEW_LIB)
+            find_library(GLEW_LIB 
+                NAMES GLEW glew
+                PATHS
+                "C:/vcpkg/installed/x64-windows/lib"
+                "C:/vcpkg/installed/x86-windows/lib"
+                "/usr/lib"
+                "/usr/local/lib"
+            )
+            find_path(GLEW_INCLUDE_DIR GL/glew.h
+                PATHS
+                "C:/vcpkg/installed/x64-windows/include"
+                "C:/vcpkg/installed/x86-windows/include"
+                "/usr/include"
+                "/usr/local/include"
+            )
+        endif()
     endif()
 endif()
 
-if(NOT GLFW_LIB)
+if(NOT GLFW_LIB AND NOT GLFW_FOUND_LOCAL)
     if(APPLE)
         message(FATAL_ERROR "GLFW not found. Install via: brew install glfw")
     elseif(UNIX)
@@ -261,6 +284,30 @@ if(NOT GLFW_LIB)
     else()
         message(FATAL_ERROR "GLFW not found. Install GLFW or use vcpkg: vcpkg install glfw3")
     endif()
+endif()
+
+# On Windows without vcpkg: fetch and build GLEW via FetchContent (release zip has include/)
+if(NOT GLEW_LIB AND WIN32)
+    include(FetchContent)
+    FetchContent_Declare(
+        glew_release
+        URL https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(BUILD_UTILS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_Populate(glew_release)
+    # Release zip may extract to glew_release-src/ or glew_release-src/glew-2.2.0/
+    if(EXISTS "${glew_release_SOURCE_DIR}/include/GL/glew.h")
+        set(GLEW_DIR ${glew_release_SOURCE_DIR} CACHE PATH "" FORCE)
+    else()
+        set(GLEW_DIR ${glew_release_SOURCE_DIR}/glew-2.2.0 CACHE PATH "" FORCE)
+    endif()
+    add_subdirectory(${GLEW_DIR}/build/cmake ${CMAKE_BINARY_DIR}/glew)
+    set(GLEW_INCLUDE_DIR ${GLEW_DIR}/include)
+    set(GLEW_LIB glew_s)
+    set(GLEW_FOUND_FETCH TRUE)
+    message(STATUS "Using GLEW from FetchContent: ${GLEW_DIR}")
 endif()
 
 if(NOT GLEW_LIB)
@@ -302,6 +349,11 @@ add_executable(gear360_viewer
     stitching.cpp
 )
 
+# Ensure console subsystem on Windows so output and "Press Enter" are visible when run from terminal
+if(MSVC)
+    set_target_properties(gear360_viewer PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
+endif()
+
 # Include directories
 target_include_directories(gear360_viewer PRIVATE
     ${FFMPEG_INCLUDE_DIR}
@@ -309,14 +361,24 @@ target_include_directories(gear360_viewer PRIVATE
     ${GLEW_INCLUDE_DIR}
 )
 
-# Link libraries
+# Link libraries (use targets when built from local/FetchContent)
+if(GLFW_FOUND_LOCAL)
+    set(GLFW_LINK_LIBS glfw)
+else()
+    set(GLFW_LINK_LIBS ${GLFW_LIB})
+endif()
+if(GLEW_FOUND_FETCH)
+    set(GLEW_LINK_LIBS glew_s)
+else()
+    set(GLEW_LINK_LIBS ${GLEW_LIB})
+endif()
 target_link_libraries(gear360_viewer
     ${AVFORMAT_LIB}
     ${AVCODEC_LIB}
     ${SWSCALE_LIB}
     ${AVUTIL_LIB}
-    ${GLFW_LIB}
-    ${GLEW_LIB}
+    ${GLFW_LINK_LIBS}
+    ${GLEW_LINK_LIBS}
     OpenGL::GL
 )
 
@@ -359,8 +421,8 @@ if(FFMPEG_PREFIX)
 else()
     message(STATUS "  FFmpeg: ${FFMPEG_INCLUDE_DIR}")
 endif()
-message(STATUS "  GLFW: ${GLFW_LIB}")
-message(STATUS "  GLEW: ${GLEW_LIB}")
+message(STATUS "  GLFW: ${GLFW_LINK_LIBS}")
+message(STATUS "  GLEW: ${GLEW_LINK_LIBS}")
 message(STATUS "")
 message(STATUS "To build:")
 message(STATUS "  mkdir build && cd build")

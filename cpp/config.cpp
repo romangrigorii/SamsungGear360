@@ -3,15 +3,28 @@
 #include <iostream>
 #include <csignal>
 #include <cmath>
+#include <sstream>
+#include <fstream>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 Options g_options;
 FrameData g_frameData;
 std::atomic<bool> g_running(true);
 std::atomic<AVFormatContext*> g_formatContext(nullptr);
+std::atomic<bool> g_streamOpenFailed(false);
 StitchParams g_stitchParams;
 
 // Store calibration file path for reload
 static std::string g_calibrationFilePath;
+// Persistent stream URL when loaded from viewer.toml (g_options.url points into this)
+static std::string g_streamUrl;
+// Optional ffplay path from viewer.toml [external_player] (g_options.ffplayPath points into this)
+static std::string g_ffplayPath;
+// Optional GStreamer gst-launch path and params (g_options.gstLaunchPath points into this)
+static std::string g_gstLaunchPath;
 
 void setCalibrationFilePath(const std::string& path) {
     g_calibrationFilePath = path;
@@ -28,6 +41,82 @@ bool reloadCalibration() {
     }
     std::cout << "\n=== Reloading calibration ===" << std::endl;
     return loadCalibrationFromFile(g_calibrationFilePath);
+}
+
+// Return first path that exists: exe-relative (cpp folder), then cwd
+static bool fileExists(const std::string& path) {
+    std::ifstream f(path);
+    return f.good();
+}
+
+std::string resolveConfigPath(const std::string& filename) {
+    if (filename.empty()) return std::string();
+    if (fileExists(filename))
+        return filename;
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) != 0) {
+        std::string dir(exePath);
+        size_t last = dir.find_last_of("\\/");
+        if (last != std::string::npos)
+            dir.resize(last);
+        const char* suffixes[] = { "\\..\\..\\..", "\\..\\..", "\\..", "" };
+        for (const char* suf : suffixes) {
+            std::string candidate = dir + suf + "\\" + filename;
+            if (fileExists(candidate))
+                return candidate;
+        }
+    }
+#else
+    (void)filename;
+#endif
+    return std::string();
+}
+
+// Load stream config from viewer.toml: [stream] ip, port -> sets g_options.url
+bool loadStreamConfig(const std::string& filename) {
+    std::string path = resolveConfigPath(filename);
+    if (path.empty()) {
+        if (!fileExists(filename))
+            return false;  // optional config missing, no error message
+        path = filename;
+    }
+    TomlParser toml;
+    if (!toml.parse(path)) {
+        return false;
+    }
+    if (!toml.hasSection("stream")) {
+        return false;
+    }
+    std::string ip = toml.getString("stream", "ip", "10.0.0.210");
+    int port = toml.getInt("stream", "port", 7679);
+    std::string pathPart = toml.getString("stream", "path", "/livestream_high.avi");
+    if (pathPart.empty() || pathPart[0] != '/') {
+        pathPart = "/" + pathPart;
+    }
+    std::ostringstream oss;
+    oss << "http://" << ip << ":" << port << pathPart;
+    g_streamUrl = oss.str();
+    g_options.url = g_streamUrl.c_str();
+    if (toml.hasSection("external_player")) {
+        g_ffplayPath = toml.getString("external_player", "ffplay", "");
+        g_options.ffplayPath = g_ffplayPath.empty() ? nullptr : g_ffplayPath.c_str();
+        g_gstLaunchPath = toml.getString("external_player", "gst_launch", "");
+        g_options.gstLaunchPath = g_gstLaunchPath.empty() ? nullptr : g_gstLaunchPath.c_str();
+        g_options.gstQueueMaxBuffers = toml.getInt("external_player", "gst_queue_max_buffers", 1);
+        g_options.gstQueueMaxTimeMs = toml.getInt("external_player", "gst_queue_max_time_ms", 0);
+        g_options.gstSync = toml.getInt("external_player", "gst_sync", 0) != 0;
+    } else {
+        g_ffplayPath.clear();
+        g_options.ffplayPath = nullptr;
+        g_gstLaunchPath.clear();
+        g_options.gstLaunchPath = nullptr;
+        g_options.gstQueueMaxBuffers = 1;
+        g_options.gstQueueMaxTimeMs = 0;
+        g_options.gstSync = false;
+    }
+    std::cout << "Stream URL from " << path << ": " << g_streamUrl << std::endl;
+    return true;
 }
 
 // Signal handler for graceful shutdown

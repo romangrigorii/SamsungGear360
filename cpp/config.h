@@ -13,6 +13,11 @@ extern "C" {
 // Command-line options
 struct Options {
     const char* url = "http://192.168.43.1:7679/livestream_high.avi";
+    const char* ffplayPath = nullptr;   // optional path to ffplay.exe (from viewer.toml [external_player])
+    const char* gstLaunchPath = nullptr; // optional path to gst-launch-1.0 (for --gstreamer)
+    int gstQueueMaxBuffers = 1;         // queue max-size-buffers (1 = low latency)
+    int gstQueueMaxTimeMs = 0;          // queue max-size-time in ms (0 = no limit)
+    bool gstSync = false;                // autovideosink sync
     bool rectilinearMode = false;  // Enable rectilinear conversion
     bool equirectangularMode = false;  // Enable equirectangular projection
     float fov = 195.0f;  // FOV in degrees (used when rectilinear or equirectangular is enabled)
@@ -78,6 +83,11 @@ struct StitchParams {
     bool firstFrameCollected = false;
 };
 
+// Resolve config file path: try next to exe (../../.. for cpp), then cwd
+std::string resolveConfigPath(const std::string& filename);
+// Load stream URL from viewer.toml [stream] ip + port (sets default URL)
+bool loadStreamConfig(const std::string& filename);
+
 // Load calibration from TOML file
 bool loadCalibrationFromFile(const std::string& filename);
 
@@ -93,6 +103,7 @@ extern Options g_options;
 extern FrameData g_frameData;
 extern std::atomic<bool> g_running;
 extern std::atomic<AVFormatContext*> g_formatContext;
+extern std::atomic<bool> g_streamOpenFailed;
 extern StitchParams g_stitchParams;
 
 // Signal handler

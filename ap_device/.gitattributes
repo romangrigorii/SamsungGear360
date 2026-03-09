@@ -1,0 +1,3 @@
+# Force LF so scripts run on Pi after scp from Windows
+*.sh text eol=lf
+*.py text eol=lf
