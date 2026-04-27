@@ -15,3 +15,4 @@ else
 fi
 echo ""
 echo "Compare the SSID in brackets above with config/camera_wifi.conf (exact match required)."
+

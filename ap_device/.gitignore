@@ -1,5 +1,2 @@
-# Local config (credentials / host settings)
-config/camera_wifi.conf
-config/pc_defaults.ps1
 # Pi relay log (if synced back)
 relay.log

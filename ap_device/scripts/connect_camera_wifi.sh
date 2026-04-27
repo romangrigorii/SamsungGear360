@@ -6,13 +6,19 @@
 #   ./connect_camera_wifi.sh                          # read SSID/password from camera_wifi.conf
 #   ./connect_camera_wifi.sh "MyGear360" "mypass"     # SSID and password as arguments
 #   ./connect_camera_wifi.sh --ssid "MyGear360" --password "mypass"
+#
+# Notes:
+# - This script is intended to run on the Pi.
+# - By default it uses interface wlan0, and config at ../config/camera_wifi.conf
 
 set -e
 
 SCRIPT_DIR="$(dirname "$0")"
-# Prefer config/camera_wifi.conf, then legacy camera_wifi.conf in script dir
-CONF_FILE="$SCRIPT_DIR/config/camera_wifi.conf"
-[ -f "$CONF_FILE" ] || CONF_FILE="$SCRIPT_DIR/camera_wifi.conf"
+AP_DEVICE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Prefer config/camera_wifi.conf, then legacy camera_wifi.conf in ap_device dir
+CONF_FILE="$AP_DEVICE_DIR/config/camera_wifi.conf"
+[ -f "$CONF_FILE" ] || CONF_FILE="$AP_DEVICE_DIR/camera_wifi.conf"
 INTERFACE="wlan0"
 
 usage() {
@@ -177,3 +183,4 @@ else
     echo "  With NetworkManager: nmcli device wifi connect \"$SSID\" password \"$PASSWORD\"" >&2
     exit 1
 fi
+

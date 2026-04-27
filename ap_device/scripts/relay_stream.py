@@ -164,7 +164,9 @@ def handle_request(conn, source_url, allow_list):
     try:
         # Status line (reason phrase for common codes)
         code = upstream.getcode()
-        reason = {200: "OK", 206: "Partial Content", 302: "Found", 404: "Not Found"}.get(code, "OK")
+        reason = {200: "OK", 206: "Partial Content", 302: "Found", 404: "Not Found"}.get(
+            code, "OK"
+        )
         conn.sendall(("HTTP/1.1 %d %s\r\n" % (code, reason)).encode())
         # Copy headers (exclude hop-by-hop and connection).
         # Drop Content-Length so clients read until close (camera sends 2^64-1; FFmpeg then says "stream ends prematurely").
@@ -176,7 +178,9 @@ def handle_request(conn, source_url, allow_list):
                 continue
             conn.sendall(("%s: %s\r\n" % (name, value)).encode())
         conn.sendall(b"Connection: close\r\n")
-        conn.sendall(b"X-Relay-Version: 2\r\n")  # so you can curl -I and confirm updated relay is running
+        conn.sendall(
+            b"X-Relay-Version: 2\r\n"
+        )  # so you can curl -I and confirm updated relay is running
         conn.sendall(b"\r\n")
 
         # Stream body
@@ -215,7 +219,10 @@ def main():
 
     print("Gear 360 stream relay")
     print("  Source: %s" % args.source_url)
-    print("  Listen: http://%s:%s%s" % (args.bind if args.bind != "0.0.0.0" else "<all>:7679", args.port, STREAM_PATH))
+    print(
+        "  Listen: http://%s:%s%s"
+        % (args.bind if args.bind != "0.0.0.0" else "<all>:7679", args.port, STREAM_PATH)
+    )
     if allow_list:
         print("  Allowed IPs: %s" % ", ".join(allow_list))
     print("On your PC, open: http://<PI_IP>:%s%s" % (args.port, STREAM_PATH))
@@ -239,3 +246,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
