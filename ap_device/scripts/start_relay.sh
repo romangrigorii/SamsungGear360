@@ -16,7 +16,7 @@ sleep 2
 echo "--- $(date) ---" > "$LOG"
 which python3 >> "$LOG" 2>&1
 python3 --version >> "$LOG" 2>&1
-nohup python3 relay_stream.py --port "$PORT" >> "$LOG" 2>&1 &
+nohup python3 scripts/relay_stream.py --port "$PORT" >> "$LOG" 2>&1 &
 sleep 2
 if pgrep -f relay_stream.py >/dev/null; then
     echo started
@@ -24,3 +24,4 @@ else
     echo failed
     cat "$LOG" 1>&2
 fi
+
