@@ -11,9 +11,8 @@ View live video streams from a Samsung Gear 360 camera.
 | **`hardware_setup`** | Raspberry Pi **relay** setup: scripts and config so the Pi bridges the camera Wi‑Fi to your LAN and serves the stream over HTTP (see `hardware_setup/README.md`). |
 | **`cpp_player/`** | **C++** viewer: OpenGL + FFmpeg, equirectangular / rectilinear projection, optional stitching and `calibration.toml`. Can also launch **ffplay** or **GStreamer** for a plain preview. Build with CMake; details in `cpp_player/README.md`. |
 | **`python_player/`** | **Python** viewer (`gear360_viewer.py`): OpenCV-based playback and projection, quick to iterate on. Install deps from `python_player/requirements.txt`. |
+| **`camera_calibration/`** | **Calibration tooling**: fit lens parameters from images/video and write `calibration.toml` for `cpp_player` / `python_player` (`camera_calibration/README.md`). |
 | **`libs/glfw/`** | **Git submodule**: GLFW, used by `cpp_player` for windowing and OpenGL context. Initialize with `git submodule update --init --recursive` after clone. |
-
-Optional tooling referenced in `.gitmodules` (e.g. calibration helpers) may appear under other paths once submodules are checked out.
 
 ## Quick Start
 
