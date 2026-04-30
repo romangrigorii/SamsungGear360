@@ -10,6 +10,18 @@ Goal: view the Gear 360 live stream **from your normal network** (so your PC sta
 - Pi **Wi‑Fi** connects to the Gear 360 camera’s Wi‑Fi AP.
 - SSH enabled on the Pi (so your PC can run the setup script).
 
+### 0) Get camera to streaming state
+
+Press and hold the bluetopth button on the device (top button)
+Connect to IOS should show up - press the red record button (OK)
+Copy the credential for step 1. 
+
+NOTE: after connecting for the first time and closing the video stream you will need to
+press and hold the blue tooth button again, and then press and hold the record button. 
+The camera should auto connect to the video sink. 
+
+The camera is ready to stream video when the blue LED between top and bottom buttons is on. 
+
 ### 1) Set camera Wi‑Fi credentials (on your PC)
 
 Edit:
@@ -32,6 +44,8 @@ Edit (optional):
 Or just pass flags when running.
 
 ### 3) Start relay (run from your PC)
+
+`run_from_pc.ps1` syncs **only** `ap_device/scripts/*` and `ap_device/config/*` to the Pi (no README/dotfiles).
 
 From PowerShell:
 

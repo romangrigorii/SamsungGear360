@@ -342,6 +342,7 @@ endif()
 
 add_executable(gear360_viewer
     main.cpp
+    logging.cpp
     config.cpp
     shaders/shaders.cpp
     renderer.cpp

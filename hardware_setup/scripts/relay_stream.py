@@ -20,19 +20,75 @@ Options:
 """
 
 import argparse
+import logging
+import os
 import socket
 import threading
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
 import sys
 
-# Defaults matching Gear 360 camera AP
-DEFAULT_SOURCE_URL = "http://192.168.43.1:7679/livestream_high.avi"
-DEFAULT_PORT = 7679
-DEFAULT_BIND = "0.0.0.0"
 CHUNK_SIZE = 64 * 1024  # 64 KB
 STREAM_PATH = "/livestream_high.avi"
+
+
+def _relay_conf_paths():
+    here = os.path.dirname(os.path.abspath(__file__))
+    ap_root = os.path.abspath(os.path.join(here, ".."))
+    return [
+        os.path.join(ap_root, "config", "relay.conf"),
+        os.path.join(ap_root, "relay.conf"),
+    ]
+
+
+def load_relay_conf():
+    """
+    Load optional KEY=VALUE settings from config/relay.conf (if present).
+    Unknown keys are ignored. Lines may use CRLF.
+    Supported keys:
+      SOURCE_URL=http://192.168.43.1:7679/livestream_high.avi
+      BIND=0.0.0.0
+      PORT=7679
+      ALLOW_IP=10.0.0.23
+      LOG_FILE=/var/log/gear360_relay.log
+      LOG_LEVEL=INFO
+    """
+    out = {}
+    for path in _relay_conf_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip().replace("\r", "")
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k:
+                        out[k.upper()] = v
+        except OSError:
+            continue
+    return out
+
+
+_RELAY_CONF = load_relay_conf()
+
+# Defaults matching Gear 360 camera AP (can be overridden by config/relay.conf)
+DEFAULT_SOURCE_URL = _RELAY_CONF.get("SOURCE_URL", "http://192.168.43.1:7679/livestream_high.avi")
+DEFAULT_BIND = _RELAY_CONF.get("BIND", "0.0.0.0")
+try:
+    DEFAULT_PORT = int(str(_RELAY_CONF.get("PORT", "7679")).strip())
+except Exception:
+    DEFAULT_PORT = 7679
+DEFAULT_ALLOW_IP = _RELAY_CONF.get("ALLOW_IP", "")
+DEFAULT_LOG_FILE = _RELAY_CONF.get("LOG_FILE", "").strip()
+DEFAULT_LOG_LEVEL = _RELAY_CONF.get("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
 
 def parse_args():
@@ -57,10 +113,48 @@ def parse_args():
     )
     p.add_argument(
         "--allow-ip",
-        default="",
+        default=DEFAULT_ALLOW_IP,
         help="Only allow these client IPs (comma-separated); empty = allow all",
     )
+    p.add_argument(
+        "--log-file",
+        default=DEFAULT_LOG_FILE,
+        help="Append logs to this file (empty = stdout/stderr only). Can set LOG_FILE in relay.conf.",
+    )
+    p.add_argument(
+        "--log-level",
+        default=DEFAULT_LOG_LEVEL,
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Logging verbosity (default from relay.conf LOG_LEVEL or INFO)",
+    )
     return p.parse_args()
+
+
+def configure_logging(log_file, level_name):
+    level = getattr(logging, level_name, logging.INFO)
+    fmt = "%(asctime)s %(levelname)s [%(threadName)s] %(message)s"
+    datefmt = "%Y-%m-%dT%H:%M:%SZ"
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+
+    class UtcFormatter(logging.Formatter):
+        converter = time.gmtime
+
+    formatter = UtcFormatter(fmt, datefmt)
+
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setFormatter(formatter)
+    root.addHandler(sh)
+
+    if log_file:
+        try:
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fh.setFormatter(formatter)
+            root.addHandler(fh)
+        except OSError as e:
+            print("Could not open --log-file %s: %s" % (log_file, e), file=sys.stderr)
 
 
 def allowed_client(client_ip, allow_list):
@@ -106,7 +200,8 @@ def handle_request(conn, source_url, allow_list):
     method = parts[0] if len(parts) >= 1 else ""
     path = parts[1] if len(parts) >= 2 else ""
 
-    if method.upper() != "GET" or STREAM_PATH not in path:
+    method_u = method.upper()
+    if method_u not in ("GET", "HEAD") or STREAM_PATH not in path:
         try:
             conn.sendall(
                 b"HTTP/1.1 404 Not Found\r\n"
@@ -114,6 +209,25 @@ def handle_request(conn, source_url, allow_list):
                 b"Connection: close\r\n\r\nNot Found. Use GET "
                 + STREAM_PATH.encode()
                 + b"\n"
+            )
+        except Exception:
+            pass
+        conn.close()
+        return
+
+    # IMPORTANT:
+    # HEAD must NOT open the upstream camera connection.
+    # Many Gear360 setups behave like "single client" streams; urllib may also consume/trigger upstream reads for HEAD,
+    # which can wedge the camera and break subsequent GET/ffplay sessions.
+    if method_u == "HEAD":
+        try:
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: video/x-msvideo\r\n"
+                b"Cache-Control: no-cache\r\n"
+                b"Connection: close\r\n"
+                b"X-Relay-Version: 3\r\n"
+                b"\r\n"
             )
         except Exception:
             pass
@@ -143,7 +257,7 @@ def handle_request(conn, source_url, allow_list):
         except Exception:
             pass
         conn.close()
-        print("[%s] Camera HTTP error: %s %s" % (client_ip, e.code, e.reason))
+        logging.warning("Camera HTTP error from %s: %s %s", client_ip, e.code, e.reason)
         return
     except urllib.error.URLError as e:
         try:
@@ -157,7 +271,7 @@ def handle_request(conn, source_url, allow_list):
         except Exception:
             pass
         conn.close()
-        print("[%s] Upstream error: %s" % (client_ip, e))
+        logging.warning("Upstream error from %s: %s", client_ip, e)
         return
 
     # Forward headers from camera to client (status + headers)
@@ -179,20 +293,24 @@ def handle_request(conn, source_url, allow_list):
             conn.sendall(("%s: %s\r\n" % (name, value)).encode())
         conn.sendall(b"Connection: close\r\n")
         conn.sendall(
-            b"X-Relay-Version: 2\r\n"
+            b"X-Relay-Version: 3\r\n"
         )  # so you can curl -I and confirm updated relay is running
         conn.sendall(b"\r\n")
 
-        # Stream body
-        while True:
-            chunk = upstream.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            conn.sendall(chunk)
+        if method_u == "GET":
+            # Stream body
+            while True:
+                chunk = upstream.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                try:
+                    conn.sendall(chunk)
+                except (BrokenPipeError, ConnectionResetError, socket.error):
+                    break
     except (BrokenPipeError, ConnectionResetError, socket.error) as e:
-        print("[%s] Client disconnected: %s" % (client_ip, e))
+        logging.info("Client disconnected %s: %s", client_ip, e)
     except Exception as e:
-        print("[%s] Relay error: %s" % (client_ip, e))
+        logging.exception("Relay error for %s: %s", client_ip, e)
     finally:
         try:
             upstream.close()
@@ -206,6 +324,7 @@ def handle_request(conn, source_url, allow_list):
 
 def main():
     args = parse_args()
+    configure_logging(args.log_file.strip(), args.log_level)
     allow_list = [x.strip() for x in args.allow_ip.split(",") if x.strip()]
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -213,20 +332,18 @@ def main():
     try:
         server.bind((args.bind, args.port))
     except OSError as e:
-        print("Bind failed: %s" % e, file=sys.stderr)
+        logging.error("Bind failed: %s", e)
         return 1
     server.listen(8)
 
-    print("Gear 360 stream relay")
-    print("  Source: %s" % args.source_url)
-    print(
-        "  Listen: http://%s:%s%s"
-        % (args.bind if args.bind != "0.0.0.0" else "<all>:7679", args.port, STREAM_PATH)
-    )
+    logging.info("Gear 360 stream relay starting")
+    logging.info("Source: %s", args.source_url)
+    listen_host = args.bind if args.bind != "0.0.0.0" else "<all>"
+    logging.info("Listen: http://%s:%s%s", listen_host, args.port, STREAM_PATH)
     if allow_list:
-        print("  Allowed IPs: %s" % ", ".join(allow_list))
-    print("On your PC, open: http://<PI_IP>:%s%s" % (args.port, STREAM_PATH))
-    print("Press Ctrl+C to stop.\n")
+        logging.info("Allowed IPs: %s", ", ".join(allow_list))
+    logging.info("On your PC, open: http://<PI_IP>:%s%s", args.port, STREAM_PATH)
+    logging.info("Press Ctrl+C to stop.")
 
     while True:
         try:

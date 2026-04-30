@@ -3,7 +3,7 @@
     Run Gear 360 ap_device steps on the Raspberry Pi from your PC and get a status report.
 
 .DESCRIPTION
-    1. Syncs ap_device folder to the Pi (optional).
+    1. Syncs ap_device/scripts + ap_device/config to the Pi (optional).
     2. Connects the Pi's WiFi to the camera (using config/camera_wifi.conf on Pi).
     3. Starts the stream relay on the Pi.
     Reports Pi IP and stream URL at the end.
@@ -63,9 +63,54 @@ if (Test-Path $DefaultsPath) {
 if (-not $script:PI_HOST) { $script:PI_HOST = "10.0.0.210" }
 if (-not $script:PI_USER) { $script:PI_USER = "roman" }
 if (-not $script:PI_AP_DEVICE_PATH) { $script:PI_AP_DEVICE_PATH = "~/ap_device" }
+if (-not (Test-Path variable:script:EXPECTED_LAN_PREFIX)) { $script:EXPECTED_LAN_PREFIX = "" }
 
 if ($PiHost) { $script:PI_HOST = $PiHost }
 if ($PiUser) { $script:PI_USER = $PiUser }
+
+# Optional: relay.conf PORT override for URL/report consistency with Pi relay settings
+$relayConfPath = Join-Path $ScriptDir "config\relay.conf"
+if (Test-Path $relayConfPath) {
+    try {
+        Get-Content -LiteralPath $relayConfPath | ForEach-Object {
+            $line = ($_ -replace "`r", "").Trim()
+            if (-not $line -or $line.StartsWith("#")) { return }
+            if ($line -match '^\s*PORT\s*=\s*(.+)\s*$') {
+                $p = $Matches[1].Trim().Trim('"').Trim("'")
+                if ($p -match '^\d+$') {
+                    $RelayPort = [int]$p
+                }
+            }
+        }
+    } catch { }
+}
+
+if ($script:PI_HOST -match '^\d{1,3}(\.\d{1,3}){3}$') {
+    $candidatePi = $script:PI_HOST
+    $wantPrefix = ""
+    if ($script:EXPECTED_LAN_PREFIX -and $script:EXPECTED_LAN_PREFIX.Trim()) {
+        $wantPrefix = $script:EXPECTED_LAN_PREFIX.Trim()
+    } else {
+        $oct = $candidatePi.Split(".")
+        if ($oct.Length -eq 4) { $wantPrefix = "$($oct[0]).$($oct[1]).$($oct[2])." }
+    }
+
+    $matched = $false
+    try {
+        $locals = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -and $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne "127.0.0.1" })
+        foreach ($a in $locals) {
+            $ip = [string]$a.IPAddress
+            if ($wantPrefix -and $ip.StartsWith($wantPrefix)) { $matched = $true; break }
+        }
+    } catch { }
+
+    if (-not $matched -and $wantPrefix) {
+        Write-Host "[WARN] This PC doesn't appear to have any IPv4 address on the same /24 as PiHost=$candidatePi (prefix '$wantPrefix')." -ForegroundColor Yellow
+        Write-Host "       Update config/pc_defaults.ps1 (`$script:PI_HOST) or pass -PiHost with your Pi's address on your LAN." -ForegroundColor Yellow
+        Write-Host "       NOTE: BIND in relay.conf controls where the relay listens on the Pi; your PC still uses http://<Pi LAN IP>:PORT/..." -ForegroundColor DarkYellow
+    }
+}
 
 $report = @()
 function Report-Step($name, $ok, $detail) {
@@ -143,10 +188,29 @@ echo ok
 try {
     Ensure-SshKeyAuth
 
+function Get-ExpectedCameraSsidFromConfig {
+    $cfg = Join-Path $ScriptDir "config\camera_wifi.conf"
+    if (-not (Test-Path $cfg)) { return "" }
+    try {
+        Get-Content -LiteralPath $cfg | ForEach-Object {
+            $line = ($_ -replace "`r", "").Trim()
+            if ($line -match '^\s*SSID\s*=\s*(.+)\s*$') {
+                return $Matches[1].Trim().Trim('"').Trim("'")
+            }
+        }
+    } catch { }
+    return ""
+}
+
 # ListWifi: only show what the Pi sees, then exit
 if ($ListWifi) {
     Write-Host "Listing WiFi networks visible from the Pi..." -ForegroundColor Cyan
-    Write-Host "  (Your config expects SSID: Gear 360(B8F1))" -ForegroundColor Gray
+    $expectedSsid = Get-ExpectedCameraSsidFromConfig
+    if ($expectedSsid) {
+        Write-Host "  (Your local config/camera_wifi.conf expects SSID: $expectedSsid)" -ForegroundColor Gray
+    } else {
+        Write-Host "  (No SSID found in local config/camera_wifi.conf yet)" -ForegroundColor Gray
+    }
     Write-Host ""
     $ap = $script:PI_AP_DEVICE_PATH
     $listCmd = 'cd ' + $ap + ' 2>/dev/null; if [ -f scripts/list_wifi.sh ]; then sed -i ''s/\r$//'' scripts/list_wifi.sh 2>/dev/null; chmod +x scripts/list_wifi.sh; bash scripts/list_wifi.sh; else nmcli -t -f SSID,SIGNAL device wifi list 2>/dev/null | while IFS=: read -r s n; do echo "  SSID: [$s]  Signal: ${n}%"; done; fi'
@@ -160,12 +224,45 @@ if ($ListWifi) {
 if (-not $SkipSync) {
     try {
         Push-Location $SamsungGear360Dir
-        scp -r @scpArgs "ap_device" "${piTarget}:~/"
+        # Sync only operational scripts + configs (avoid README/dotfiles).
+        # IMPORTANT (Windows OpenSSH): literal "$HOME/..." in scp destinations does NOT expand.
+        # Use either "~/..." scp targets, or expand $HOME on the Pi explicitly (more reliable for mkdir).
+        $remotePrefix = ($script:PI_AP_DEVICE_PATH.Trim())
+        if (-not $remotePrefix.StartsWith("~/")) {
+            throw "PI_AP_DEVICE_PATH must start with '~/'. Got: '$remotePrefix'"
+        }
+
+        $remoteHome = (ssh @sshArgs $piTarget "echo `$HOME").Trim()
+        if (-not $remoteHome) { throw "Could not resolve remote `$HOME via ssh." }
+        $remoteApRoot = ($remotePrefix -replace '^~', $remoteHome)
+        ssh @sshArgs $piTarget "mkdir -p `"$remoteApRoot/scripts`" `"$remoteApRoot/config`""
+        if ($LASTEXITCODE -ne 0) { throw "mkdir failed on Pi for $remoteApRoot" }
+
+        $files = @(
+            "ap_device/scripts/connect_camera_wifi.sh",
+            "ap_device/scripts/list_wifi.sh",
+            "ap_device/scripts/start_relay.sh",
+            "ap_device/scripts/relay_stream.py",
+            "ap_device/config/camera_wifi.conf",
+            "ap_device/config/relay.conf"
+        )
+
+        foreach ($rel in $files) {
+            $localPath = Join-Path $SamsungGear360Dir $rel
+            if (-not (Test-Path $localPath)) { continue }
+            if (-not $rel.StartsWith("ap_device/")) { continue }
+            $remoteRel = $rel.Substring("ap_device/".Length)
+            # Use "~/..." form; OpenSSH expands this correctly on the remote side for uploads.
+            $remotePath = "${piTarget}:${remotePrefix}/${remoteRel}"
+            scp @scpArgs $localPath $remotePath
+            if ($LASTEXITCODE -ne 0) { throw "scp failed: $localPath -> $remotePath" }
+        }
+
+        Report-Step "Sync ap_device to Pi" $true "~/ap_device updated (scripts + config only)"
         Pop-Location
-        Report-Step "Sync ap_device to Pi" $true "~/ap_device updated"
         # Fix Windows CRLF on Pi so scripts execute (shebang "#!/bin/bash\r" fails); use tr (more portable than sed \x0d)
         try {
-            $fixCmd = 'cd ' + $script:PI_AP_DEVICE_PATH + ' && for f in scripts/connect_camera_wifi.sh scripts/list_wifi.sh scripts/start_relay.sh scripts/relay_stream.py; do tr -d ''\r'' < "$f" > "$f.n" 2>/dev/null && mv "$f.n" "$f"; done; for f in config/camera_wifi.conf; do [ -f "$f" ] && tr -d ''\r'' < "$f" > "$f.n" 2>/dev/null && mv "$f.n" "$f"; done; chmod +x scripts/connect_camera_wifi.sh scripts/list_wifi.sh scripts/start_relay.sh'
+            $fixCmd = 'cd ' + $script:PI_AP_DEVICE_PATH + ' && for f in scripts/connect_camera_wifi.sh scripts/list_wifi.sh scripts/start_relay.sh scripts/relay_stream.py; do tr -d ''\r'' < "$f" > "$f.n" 2>/dev/null && mv "$f.n" "$f"; done; for f in config/camera_wifi.conf config/relay.conf; do [ -f "$f" ] && tr -d ''\r'' < "$f" > "$f.n" 2>/dev/null && mv "$f.n" "$f"; done; chmod +x scripts/connect_camera_wifi.sh scripts/list_wifi.sh scripts/start_relay.sh'
             ssh @sshArgs $piTarget $fixCmd 2>&1 | Out-Null
         } catch { }
     } catch {
@@ -204,15 +301,26 @@ if (-not $SkipRelay) {
             Write-Host "  relay.log:" -ForegroundColor Gray
             $out | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         }
-        # Verify updated relay is serving (X-Relay-Version: 2 = Content-Length stripped)
+        # Verify updated relay is serving (X-Relay-Version >= 2 expected)
         if ($started) {
             try {
+                Add-Type -AssemblyName System.Net.Http | Out-Null
                 $checkUrl = "http://$($script:PI_HOST):$RelayPort/livestream_high.avi"
-                $headers = Invoke-WebRequest -Uri $checkUrl -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction SilentlyContinue
-                $ver = $headers.Headers["X-Relay-Version"]
-                if ($ver -ne "2") {
-                    Write-Host "  [WARN] Relay may be old version (no X-Relay-Version: 2). Restart on Pi: pkill -f relay_stream.py; cd ~/ap_device; bash scripts/start_relay.sh $RelayPort" -ForegroundColor Yellow
+                $http = [System.Net.Http.HttpClient]::new()
+                $http.Timeout = [TimeSpan]::FromSeconds(8)
+                $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Head, $checkUrl)
+                $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
+                $ver = $null
+                if ($resp.Headers.Contains("X-Relay-Version")) {
+                    $ver = ($resp.Headers.GetValues("X-Relay-Version") | Select-Object -First 1)
                 }
+                $verNum = 0
+                if ($ver -match '^\d+$') { $verNum = [int]$ver }
+                if ($verNum -lt 2) {
+                    Write-Host "  [WARN] Relay may be old version (X-Relay-Version=$ver). Restart on Pi: pkill -f relay_stream.py; cd ~/ap_device; bash scripts/start_relay.sh $RelayPort" -ForegroundColor Yellow
+                }
+                $resp.Dispose()
+                $http.Dispose()
             } catch {
                 Write-Host "  [WARN] Could not verify relay version (stream may not be ready yet)." -ForegroundColor Yellow
             }

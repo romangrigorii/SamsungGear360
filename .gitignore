@@ -54,3 +54,9 @@ build/
 *.tmp
 *.bak
 *.cache
+
+# Saved recordings and screenshots (keep the folder, ignore its contents)
+python/saved_files/*
+!python/saved_files/.gitkeep
+python_player/saved_files/*
+!python_player/saved_files/.gitkeep

@@ -112,7 +112,8 @@ echo "Connecting to camera WiFi: $SSID (interface: $INTERFACE)"
 if command -v nmcli &>/dev/null; then
     current_conn=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | grep ":${INTERFACE}$" | head -1 | cut -d: -f1)
     if [ -n "$current_conn" ]; then
-        current_ssid=$(nmcli -t -f 802-11-wireless.ssid connection show "$current_conn" 2>/dev/null | head -1)
+        # nmcli -t returns "802-11-wireless.ssid:<ssid>" (or empty). Strip the field name.
+        current_ssid=$(nmcli -t -f 802-11-wireless.ssid connection show "$current_conn" 2>/dev/null | head -1 | cut -d: -f2-)
         if [ "$current_ssid" = "$SSID" ]; then
             echo "Already connected to camera WiFi ($SSID). Skipping."
             echo "Camera stream should be at: http://192.168.43.1:7679/livestream_high.avi"

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "logging.h"
 #include "shaders/shaders.h"
 #include "renderer.h"
 #include "video_decoder.h"
@@ -40,7 +41,8 @@ void printUsage(const char* programName) {
     std::cout << "  --fov <degrees>     Field of view for conversions (default: 195 when --rectilinear or --equirectangular used)" << std::endl;
     std::cout << "  --stitch            Enable stitch mode for equirectangular projection" << std::endl;
     std::cout << "  --calibration <file>  Load calibration parameters from TOML file" << std::endl;
-    std::cout << "  --help              Show this help message" << std::endl;
+    std::cout << "  --light-falloff     Enable lens light falloff compensation (shader)" << std::endl;
+    std::cout << "  --help, -h          Show this help message" << std::endl;
     std::cout << std::endl;
     std::cout << "Stream URL: from viewer.toml [stream] (ip, port, path), or pass [url] on command line." << std::endl;
     std::cout << "On Windows, set [external_player] ffplay in viewer.toml if ffplay is not in PATH." << std::endl;
@@ -137,6 +139,15 @@ static int runExternalPlayer(bool useGstreamer, const std::string& url) {
 
 static bool s_useFfplay = false;
 static bool s_useGstreamer = false;
+
+static bool argvRequestsHelp(int argc, char** argv)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
+            return true;
+    }
+    return false;
+}
 
 int parseArguments(int argc, char* argv[]) {
     loadStreamConfig("viewer.toml");
@@ -236,6 +247,10 @@ int main(int argc, char* argv[]) {
     // Set up signal handlers for graceful shutdown
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+
+    // Tee subsequent diagnostics to <exe_dir>/gear360_viewer.log (skip when printing --help only)
+    if (!argvRequestsHelp(argc, argv))
+        initLoggingToFile(argc, argv);
     
     // Parse command-line arguments
     int parseResult = parseArguments(argc, argv);
