@@ -1,3 +1,8 @@
 [submodule "libs/glfw"]
 	path = libs/glfw
 	url = https://github.com/glfw/glfw.git
+
+[submodule "camera_calibration"]
+	path = camera_calibration
+	url = git@github.com:Vipresz/360_calibration.git
+	branch = main

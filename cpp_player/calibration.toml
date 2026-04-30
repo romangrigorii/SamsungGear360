@@ -1,0 +1,50 @@
+# Samsung Gear 360 Camera Calibration Parameters
+# Generated from Python calibration tool (v2 - per-lens parameters)
+
+[lens1]
+# Lens center (normalized 0-1)
+center_x = 0.495
+center_y = 0.495
+
+# Polynomial distortion coefficients: r = f*θ*(1 + p1*θ + p2*θ² + p3*θ³ + p4*θ⁴)
+p1 = -.04
+p2 = 0.0
+p3 = 0.0
+p4 = 0.0
+
+# Per-lens rotation (degrees)
+rotation_yaw = 0.0
+rotation_pitch = 0.0
+rotation_roll = 0.0
+
+# Per-lens alignment offset (normalized 0-1)
+offset_x = 0.0
+offset_y = 0.0
+
+[lens2]
+# Lens center (normalized 0-1)
+center_x = 0.505
+center_y = 0.505
+
+# Polynomial distortion coefficients
+p1 = -.04
+p2 = 0.0
+p3 = 0.0
+p4 = 0.0
+
+# Per-lens rotation (degrees)
+rotation_yaw = 0.0
+rotation_pitch = 0.0
+rotation_roll = 0.0
+
+# Per-lens alignment offset (normalized 0-1)
+offset_x = 0.0
+offset_y = 0.0
+
+[metadata]
+# Single fisheye FOV in degrees (shader uses scale = fov_deg / 180 for both lenses)
+fov_deg = 187
+
+# Calibration source
+calibration_method = "procedural_tracking_v2"
+frames_processed = 100

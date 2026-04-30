@@ -1,0 +1,39 @@
+# Gear 360 Python viewer config
+# CLI flags always win over these values.
+# Edit to change defaults without retyping flags every run.
+
+[stream]
+ip   = "10.0.0.210"
+port = 7679
+path = "/livestream_high.avi"
+
+[viewer]
+# Display
+scale     = 1.0        # window scale factor (e.g. 0.5 for half-size)
+fps       = 0          # cap display rate Hz; 0 = uncapped (lowest latency)
+size      = ""         # force frame size "WxH" e.g. "1280x640"; empty = auto-detect
+log_level = "INFO"     # DEBUG | INFO | WARNING | ERROR
+log_file  = ""         # write log to this file (empty = stderr only)
+
+# Backend — set at most one to true (CLI --flag always overrides)
+ffplay         = false  # open in external ffplay window
+gstreamer      = false  # GStreamer (Linux) / ffplay (Windows)
+ffmpeg_opencv  = false  # force FFmpeg pipe + OpenCV
+opencv         = false  # force OpenCV VideoCapture
+
+# Misc
+# Path to calibration.toml (relative paths resolved from this file's directory).
+# Generate one from an optimizer JSON result:
+#   python camera_calibration/calib/create_calibration.py \
+#     --from-json <optimizer_result.json> --output-toml calibration.toml
+# Or create from scratch:
+#   python camera_calibration/calib/create_calibration.py \
+#     -o calibration.json --output-toml calibration.toml --preset gear360
+calibration         = ""     # e.g. "calibration.toml" or absolute path
+ignore_stream_check = false  # skip the pre-flight HEAD check
+
+[external_player]
+# ffplay = "C:/ffmpeg/bin/ffplay.exe"
+# gst_launch = "C:/Program Files/GStreamer/1.0/msvc_x86_64/bin/gst-launch-1.0.exe"
+gst_queue_max_buffers = 1
+gst_queue_max_time_ms = 0
