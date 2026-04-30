@@ -210,8 +210,8 @@ int parseArguments(int argc, char* argv[]) {
             std::cerr << "Warning: Failed to load calibration file, using defaults" << std::endl;
         }
     } else {
-        std::string calPath = resolveConfigPath("calibration.toml");
-        setCalibrationFilePath(calPath.empty() ? "calibration.toml" : calPath);
+        // Default: calibration.toml in the process current working directory only (no exe-relative search).
+        setCalibrationFilePath("calibration.toml");
     }
 
     if ((g_options.rectilinearMode || g_options.equirectangularMode) && !fovSpecified) {

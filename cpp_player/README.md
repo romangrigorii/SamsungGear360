@@ -11,8 +11,6 @@ cmake ..
 cmake --build .
 ```
 
-On Windows with the Visual Studio generator, the executable is often under `build/bin/Debug` or `build/bin/Release`. On Unix, typically `build/bin/gear360_viewer`.
-
 ### Command-line usage
 
 ```text
@@ -56,7 +54,7 @@ Run `gear360_viewer --help` for the same summary.
 ### Config files
 
 - **`viewer.toml`** — Stream URL (`[stream]`), and optional `[external_player]` paths (`ffplay`, `gst_launch`, GStreamer queue/sync options) used by `--ffplay` / `--gstreamer`.
-- **`calibration.toml`** — Default calibration path when you do not pass `--calibration` (resolved next to the executable / working directory). See `--calibration` above.
+- **`calibration.toml`** — Default when you omit `--calibration`: `./calibration.toml` relative to the **current working directory** (where you launched the process), not next to the `.exe`.
 
 ### OpenGL viewer keyboard shortcuts
 

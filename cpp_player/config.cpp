@@ -36,10 +36,17 @@ const std::string& getCalibrationFilePath() {
 
 bool reloadCalibration() {
     if (g_calibrationFilePath.empty()) {
-        std::cerr << "No calibration file path set" << std::endl;
+        std::cerr << "Cannot reload calibration: no file path is set. "
+                     "Start with --calibration <file> or use calibration.toml in the current working directory."
+                  << std::endl;
         return false;
     }
-    std::cout << "\n=== Reloading calibration ===" << std::endl;
+    if (!g_stitchParams.fromCalibrationFile) {
+        std::cerr << "No calibration is currently loaded. Trying file: " << g_calibrationFilePath
+                  << std::endl;
+    } else {
+        std::cout << "\n=== Reloading calibration ===" << std::endl;
+    }
     return loadCalibrationFromFile(g_calibrationFilePath);
 }
 
@@ -136,6 +143,23 @@ bool loadCalibrationFromFile(const std::string& filename) {
     }
     
     std::cout << "Loading calibration from: " << filename << std::endl;
+
+    // Single FOV in degrees under [metadata] sets shader scale (deg/180) for both lenses.
+    // Legacy files omit metadata and use [lens1]/[lens2] fov as scale factors (1.0 = 180°).
+    float sharedFovDeg = -1.0f;
+    if (toml.hasSection("metadata")) {
+        if (toml.hasKey("metadata", "fov_deg"))
+            sharedFovDeg = toml.getFloat("metadata", "fov_deg", 180.0f);
+        else if (toml.hasKey("metadata", "lens_fov_deg"))
+            sharedFovDeg = toml.getFloat("metadata", "lens_fov_deg", 180.0f);
+    }
+    if (sharedFovDeg >= 0.0f) {
+        float scale = sharedFovDeg / 180.0f;
+        g_stitchParams.lens1FOV = scale;
+        g_stitchParams.lens2FOV = scale;
+        std::cout << "  FOV: " << sharedFovDeg << "° ([metadata]; viewer scale factor "
+                  << scale << " for both lenses)" << std::endl;
+    }
     
     // Lens 1 parameters
     if (toml.hasSection("lens1")) {
@@ -145,11 +169,14 @@ bool loadCalibrationFromFile(const std::string& filename) {
         g_stitchParams.lens1P2 = toml.getFloat("lens1", "p2", 0.0f);
         g_stitchParams.lens1P3 = toml.getFloat("lens1", "p3", 0.0f);
         g_stitchParams.lens1P4 = toml.getFloat("lens1", "p4", 0.0f);
-        g_stitchParams.lens1FOV = toml.getFloat("lens1", "fov", 1.0f);
+        if (sharedFovDeg < 0.0f)
+            g_stitchParams.lens1FOV = toml.getFloat("lens1", "fov", 1.0f);
         
         std::cout << "  Lens 1: center=(" << g_stitchParams.lens1CenterX << ", " 
-                  << g_stitchParams.lens1CenterY << "), FOV=" << g_stitchParams.lens1FOV 
-                  << ", p2=" << g_stitchParams.lens1P2 << std::endl;
+                  << g_stitchParams.lens1CenterY << ")";
+        if (sharedFovDeg < 0.0f)
+            std::cout << ", FOV scale=" << g_stitchParams.lens1FOV;
+        std::cout << ", p2=" << g_stitchParams.lens1P2 << std::endl;
     }
     
     // Lens 2 parameters
@@ -160,7 +187,8 @@ bool loadCalibrationFromFile(const std::string& filename) {
         g_stitchParams.lens2P2 = toml.getFloat("lens2", "p2", 0.0f);
         g_stitchParams.lens2P3 = toml.getFloat("lens2", "p3", 0.0f);
         g_stitchParams.lens2P4 = toml.getFloat("lens2", "p4", 0.0f);
-        g_stitchParams.lens2FOV = toml.getFloat("lens2", "fov", 1.0f);
+        if (sharedFovDeg < 0.0f)
+            g_stitchParams.lens2FOV = toml.getFloat("lens2", "fov", 1.0f);
         
         // Per-lens rotation (from v2 format)
         const float DEG_TO_RAD = M_PI / 180.0f;
@@ -176,8 +204,10 @@ bool loadCalibrationFromFile(const std::string& filename) {
         g_stitchParams.alignmentOffset2Y = toml.getFloat("lens2", "offset_y", 0.0f);
         
         std::cout << "  Lens 2: center=(" << g_stitchParams.lens2CenterX << ", " 
-                  << g_stitchParams.lens2CenterY << "), FOV=" << g_stitchParams.lens2FOV 
-                  << ", p2=" << g_stitchParams.lens2P2 << std::endl;
+                  << g_stitchParams.lens2CenterY << ")";
+        if (sharedFovDeg < 0.0f)
+            std::cout << ", FOV scale=" << g_stitchParams.lens2FOV;
+        std::cout << ", p2=" << g_stitchParams.lens2P2 << std::endl;
         std::cout << "          rotation=(" << yaw2 << "°, " << pitch2 << "°, " << roll2 << "°)"
                   << ", offset=(" << g_stitchParams.alignmentOffset2X << ", " 
                   << g_stitchParams.alignmentOffset2Y << ")" << std::endl;

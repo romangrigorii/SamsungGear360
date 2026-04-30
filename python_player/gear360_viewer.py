@@ -208,7 +208,8 @@ def load_calibration_toml(path: str) -> dict:
 def _toml_to_camera_calibration(toml_dict: dict):
     """Convert a parsed calibration.toml dict to a CameraCalibration object.
 
-    TOML stores:  fov as scale factor (e.g. 1.083),  rotations in degrees, distortion as p1/p2/p3.
+    TOML stores: optional [metadata] fov_deg (degrees) for both lenses; else [lens] fov as scale
+    (<10) or degrees. Rotations in degrees; distortion as p1/p2/p3.
     CameraCalibration expects: fov in degrees, rotations in radians, distortion as k1/k2/k3.
     """
     try:
@@ -223,9 +224,19 @@ def _toml_to_camera_calibration(toml_dict: dict):
         logger.error("Cannot import calibration module: %s", e)
         return None
 
+    meta = toml_dict.get("metadata") or {}
+    shared_fov_deg = None
+    if meta.get("fov_deg") is not None:
+        shared_fov_deg = float(meta["fov_deg"])
+    elif meta.get("lens_fov_deg") is not None:
+        shared_fov_deg = float(meta["lens_fov_deg"])
+
     def _lens(section: dict):
-        fov_scale = float(section.get("fov", 1.0833))
-        fov_deg   = fov_scale * 180.0            # TOML stores scale; CameraCalibration wants degrees
+        if shared_fov_deg is not None:
+            fov_deg = shared_fov_deg
+        else:
+            fov_raw = float(section.get("fov", 1.0833))
+            fov_deg = fov_raw * 180.0 if fov_raw < 10.0 else fov_raw
         return LensCalibration(
             center_x      = float(section.get("center_x", 0.5)),
             center_y      = float(section.get("center_y", 0.5)),
@@ -869,11 +880,17 @@ def main() -> int:
     if cal:
         logger.info("Calibration: %s", cal)
         toml_params = load_calibration_toml(cal)
+        md = toml_params.get("metadata") or {}
+        if md.get("fov_deg") is not None or md.get("lens_fov_deg") is not None:
+            logger.debug(
+                "  metadata: fov_deg=%s",
+                md.get("fov_deg", md.get("lens_fov_deg")),
+            )
         for lens in ("lens1", "lens2"):
             lp = toml_params.get(lens, {})
             if lp:
                 logger.debug(
-                    "  %s: center=(%.4f, %.4f)  fov=%.4f  p1=%.4f p2=%.4f  "
+                    "  %s: center=(%.4f, %.4f)  fov(raw)=%.4f  p1=%.4f p2=%.4f  "
                     "yaw=%.2f pitch=%.2f roll=%.2f (deg)",
                     lens,
                     lp.get("center_x", 0.5), lp.get("center_y", 0.5),

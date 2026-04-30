@@ -214,39 +214,17 @@ vec2 fisheyeToEquirectangular(vec2 uv, float fov) {
     float Dia = min(lensW, lensH);
     float Rad = Dia * 0.5;
     
-    // Determine which half of the output we're rendering (left or right)
-    // Left half (uv.x < 0.5) uses left lens, right half uses right lens
     bool useLeft = uv.x < 0.5;
     
-    // Map output UV to equirectangular half coordinates
-    // Each half is a square output of size Dia x Dia
     float outX, outY;
     if (useLeft) {
-        outX = uv.x * 2.0;  // 0 to 1 within left half
+        outX = uv.x * 2.0;
         outY = uv.y;
     } else {
-        // For right lens: Python flips the OUTPUT (np.fliplr on right_half)
-        // This means we need to flip the column index
-        outX = 1.0 - (uv.x - 0.5) * 2.0;  // Flipped: 1 to 0 within right half
+        outX = 1.0 - (uv.x - 0.5) * 2.0;
         outY = uv.y;
     }
     
-    // Match Python: Y = 2*(R/Dia - 0.5), X = 2*(0.5 - C/Dia)
-    // But we need to flip X to correct the mirror effect (right hand shows as right hand)
-    float Y = 2.0 * (outY - 0.5);  // -1 to 1
-    float X = 2.0 * (outX - 0.5);  // -1 to 1 (flipped from Python to correct mirror)
-    
-    // BOTH lenses use the SAME offset = π/2 in Python!
-    float offset = PI * 0.5;
-    float lon = X * PI * 0.5 + offset;
-    float lat = Y * PI * 0.5;
-    
-    // Convert to 3D direction on unit sphere
-    float x_sphere = cos(lat) * cos(lon);
-    float y_sphere = cos(lat) * sin(lon);
-    float z_sphere = sin(lat);
-    
-    // Get per-lens parameters from calibration
     float cx, cy, lensFOV;
     vec4 distortion;
     float x_offset_px, y_offset_px;
@@ -261,78 +239,109 @@ vec2 fisheyeToEquirectangular(vec2 uv, float fov) {
         y_offset_px = uFromCalibrationFile ? (uAlignmentOffset1.y * lensH) : 0.0;
         lensRotation = uFromCalibrationFile ? uLens1Rotation : vec3(0.0);
     } else {
-        // Right lens: Python flips input, so center_x becomes (1 - center_x)
-        // and x_offset is negated (see fisheye_to_equirect_dual line 165-166)
         cx = uStitchCalibrated ? (1.0 - uLens2Center.x) : 0.5;
         cy = uStitchCalibrated ? uLens2Center.y : 0.5;
         lensFOV = uFromCalibrationFile ? uLens2FOV : 1.0;
         distortion = uFromCalibrationFile ? uLens2Distortion : vec4(0.0);
-        x_offset_px = uFromCalibrationFile ? (-uAlignmentOffset2.x * lensW) : 0.0;  // Negated like Python
+        x_offset_px = uFromCalibrationFile ? (-uAlignmentOffset2.x * lensW) : 0.0;
         y_offset_px = uFromCalibrationFile ? (uAlignmentOffset2.y * lensH) : 0.0;
         lensRotation = uFromCalibrationFile ? uLens2Rotation : vec3(0.0);
     }
     
-    // Apply per-lens rotation correction
-    if (uFromCalibrationFile && (lensRotation.x != 0.0 || lensRotation.y != 0.0 || lensRotation.z != 0.0)) {
-        vec3 rotated = applyRotation(vec3(x_sphere, y_sphere, z_sphere), lensRotation);
-        x_sphere = rotated.x;
-        y_sphere = rotated.y;
-        z_sphere = rotated.z;
-    }
-    
-    // Match Python: theta = arctan2(sqrt(x²+z²), y)
-    // Y is the forward axis of the lens
-    float theta = atan(sqrt(x_sphere * x_sphere + z_sphere * z_sphere), y_sphere);
-    float phi = atan(z_sphere, x_sphere);
-    
-    // Normalized theta (0 at center, 1 at 90°)
-    float theta_norm = theta / (PI * 0.5);
-    
-    // Apply polynomial distortion
-    float p1 = distortion.x;
-    float p2 = distortion.y;
-    float p3 = distortion.z;
-    float p4 = distortion.w;
-    float distortionFactor = 1.0 + p1*theta_norm + p2*theta_norm*theta_norm + 
-                             p3*theta_norm*theta_norm*theta_norm + 
-                             p4*theta_norm*theta_norm*theta_norm*theta_norm;
-    float r_f = theta * 2.0 / PI * distortionFactor;
-    
-    // Apply FOV scaling
-    float u = r_f * cos(phi) / lensFOV;
-    float v = r_f * sin(phi) / lensFOV;
-    
-    // Map to fisheye pixel coordinates
+    // Principal point (optical center) in pixels — applied after radial arms, alignment last.
     float cx_px = cx * Dia;
     float cy_px = cy * Dia;
     
-    float x_fish = cx_px + u * Rad + x_offset_px;
-    float y_fish = cy_px + v * Rad + y_offset_px;
+    float x_fish, y_fish;
     
-    // Clamp to valid range
+    if (uFromCalibrationFile) {
+        // Same pipeline order as fisheye_to_equirect_calibrated.py and as the forward rim
+        // calibration in rectilinear_to_dual_fisheye.py (theta_max / fx_fish from FOV, then k):
+        //   (1) incidence angle θ from lens optical axis
+        //   (2) FOV: normalize θ by θ_max = lens_fov_deg/2 (dimensionless r ∈ [0,~1] at rim)
+        //   (3) radial distortion polynomial on r (matches Python k1,k2,k3 on r^2,r^4,r^6)
+        //   (4) convert to pixel offset from axis: ρ = r_distorted * radius
+        //   (5) add principal point (cx_px, cy_px), then seam alignment offsets (last)
+        float lensDeg = lensFOV * 180.0;
+        float lon_range = radians(lensDeg);
+        float lon = outX * lon_range - lon_range * 0.5;
+        float lat = (0.5 - outY) * PI;
+        
+        float Xw = cos(lat) * cos(lon);
+        float Yw = cos(lat) * sin(lon);
+        float Zw = sin(lat);
+        
+        vec3 world = vec3(Xw, Yw, Zw);
+        if (lensRotation.x != 0.0 || lensRotation.y != 0.0 || lensRotation.z != 0.0) {
+            world = applyRotation(world, lensRotation);
+        }
+        
+        float Px = -world.z;
+        float Py = world.y;
+        float Pz = world.x;
+        
+        float theta_incidence = acos(clamp(Pz, -1.0, 1.0));
+        float theta_azimuth = atan(Py, Px) - PI * 0.5;
+        
+        float theta_max = radians(lensDeg * 0.5);
+        float r_norm = theta_incidence / theta_max;
+        
+        float r2 = r_norm * r_norm;
+        float r_distorted = r_norm * (1.0 + distortion.x * r2 + distortion.y * r2 * r2 + distortion.z * r2 * r2 * r2);
+        
+        float rho = r_distorted * Rad;
+        float dx = rho * cos(theta_azimuth);
+        float dy = -rho * sin(theta_azimuth);
+        
+        x_fish = cx_px + dx + x_offset_px;
+        y_fish = cy_px + dy + y_offset_px;
+    } else {
+        // Legacy path (no calibration file): same conceptual order — incidence → FOV scale →
+        // distortion → radial pixels → principal point → alignment offsets.
+        float Y = 2.0 * (outY - 0.5);
+        float X = 2.0 * (outX - 0.5);
+        float offsetLon = PI * 0.5;
+        float lon_legacy = X * PI * 0.5 + offsetLon;
+        float lat_legacy = Y * PI * 0.5;
+        
+        float x_sphere = cos(lat_legacy) * cos(lon_legacy);
+        float y_sphere = cos(lat_legacy) * sin(lon_legacy);
+        float z_sphere = sin(lat_legacy);
+        
+        float theta_inc = atan(sqrt(x_sphere * x_sphere + z_sphere * z_sphere), y_sphere);
+        float phi_ray = atan(z_sphere, x_sphere);
+        
+        float theta_norm = theta_inc / (PI * 0.5);
+        float p1 = distortion.x;
+        float p2 = distortion.y;
+        float p3 = distortion.z;
+        float p4 = distortion.w;
+        float distortionFactor = 1.0 + p1*theta_norm + p2*theta_norm*theta_norm +
+                                 p3*theta_norm*theta_norm*theta_norm +
+                                 p4*theta_norm*theta_norm*theta_norm*theta_norm;
+        float r_geom = theta_inc * 2.0 / PI * distortionFactor;
+        
+        float u = r_geom * cos(phi_ray) / lensFOV;
+        float v = r_geom * sin(phi_ray) / lensFOV;
+        
+        x_fish = cx_px + u * Rad + x_offset_px;
+        y_fish = cy_px + v * Rad + y_offset_px;
+    }
+    
     x_fish = clamp(x_fish, 0.0, Dia - 1.0);
     y_fish = clamp(y_fish, 0.0, Dia - 1.0);
     
-    // Normalize to 0-1 within lens
     float u_lens = x_fish / Dia;
     float v_lens = y_fish / Dia;
     
-    // Python flips:
-    // - Left lens: NO flips
-    // - Right lens: np.fliplr on INPUT (sample from 1-u) + np.fliplr on OUTPUT (handled by outX reversal)
-    // The outX = 1.0 - ... handles the output flip for right lens
-    // Here we only handle the input flip for right lens
     if (!useLeft) {
         u_lens = 1.0 - u_lens;
     }
     
-    // Map to full texture coordinates
     vec2 sourceUV;
     if (useLeft) {
-        // Left half of texture
         sourceUV = vec2(u_lens * 0.5, v_lens);
     } else {
-        // Right half of texture
         sourceUV = vec2(0.5 + u_lens * 0.5, v_lens);
     }
     
