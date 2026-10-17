@@ -58,7 +58,7 @@ It will sync `ap_device/` to the Pi, connect the Pi to the camera Wi‑Fi, start
 
 ### 4) View the stream
 
-- Open the printed URL in your viewer, or use FFplay:
+- Open the printed URL in `python_player/gear360_viewer.py` (fisheye, rectilinear, or draggable 360; Stitch stays off until a calibration file is loaded), or use FFplay:
 
 ```powershell
 ffplay -fflags nobuffer -flags low_delay -i "http://<PI_LAN_IP>:7679/livestream_high.avi"

@@ -7,7 +7,7 @@ center_x = 0.495
 center_y = 0.495
 
 # Polynomial distortion coefficients: r = f*θ*(1 + p1*θ + p2*θ² + p3*θ³ + p4*θ⁴)
-p1 = -.04
+p1 = -0.04
 p2 = 0.0
 p3 = 0.0
 p4 = 0.0
@@ -27,7 +27,7 @@ center_x = 0.505
 center_y = 0.505
 
 # Polynomial distortion coefficients
-p1 = -.04
+p1 = -0.04
 p2 = 0.0
 p3 = 0.0
 p4 = 0.0

@@ -63,7 +63,7 @@ pip install -r python_player/requirements.txt
 python python_player/gear360_viewer.py [url] [--fps 30] [--scale 0.5]
 ```
 
-**Controls:** `q` or `ESC` to quit (see script help for full options).
+**Controls:** the top bar (or `1` / `2` / `3`) selects fisheye, rectilinear, or 360. In 360, drag to look around. `t` turns stitch on; it uses `--calibration` and stays off until then. `r` records, `s` saves a screenshot, `q` or `ESC` quits.
 
 ## C++ viewer
 

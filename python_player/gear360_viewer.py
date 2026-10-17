@@ -6,6 +6,11 @@ Default (http/https + ffmpeg on PATH): FFmpeg decodes in a background thread →
 queue → OpenCV imshow.  The UI thread only calls waitKey so the window stays responsive
 even on slow/WiFi relays.
 
+The top bar selects Fisheye, Rectilinear, or 360. Rectilinear and 360 call
+camera_calibration/projections. 360 drags that rectilinear view (yaw and pitch).
+Stitch starts off. Turn it on and those views use the calibration file with
+stitch_dual_fisheye. Keys: 1 fisheye, 2 rectilinear, 3 360, t stitch.
+
 Backends (pick one):
   default       FFmpeg pipe + OpenCV  (auto-selected for http when ffmpeg is available)
   --ffplay      external ffplay window
@@ -24,9 +29,11 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import cv2
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,12 @@ _CAMERA_AP_URL      = "http://192.168.43.1:7679/livestream_high.avi"
 _FFMPEG_ANALYZE_US  = "2000000"
 _FFMPEG_PROBE_SIZE  = "1048576"
 _FFPROBE_TIMEOUT    = 8    # seconds per ffprobe attempt
-_GEAR360_W, _GEAR360_H = 1280, 640   # relay default; override with --size
+_GEAR360_W, _GEAR360_H = 1280, 640   # measured high stream; override with --size
+# Live view only offers these two paths. The camera does not accept a custom WxH.
+_STREAM_PATHS = {
+    "high": "/livestream_high.avi",
+    "low": "/livestream_low.avi",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +139,7 @@ def load_viewer_defaults() -> dict:
     # Hardcoded fallbacks used when the key is absent from the config file.
     d: dict = {
         "scale": 1.0, "fps": 0, "size": "",
+        "resolution": "",
         "log_level": "INFO", "log_file": "",
         "ffplay": False, "gstreamer": False,
         "ffmpeg_opencv": False, "opencv": False,
@@ -145,9 +158,13 @@ def load_viewer_defaults() -> dict:
                 d[key] = cast(v[key])
             except (TypeError, ValueError):
                 pass
-    for key in ("size", "log_file", "calibration"):
+    for key in ("size", "log_file", "calibration", "resolution"):
         if key in v:
             d[key] = str(v[key]).strip().strip('"').strip("'")
+    if d["resolution"].lower() not in ("", "high", "low"):
+        d["resolution"] = ""
+    else:
+        d["resolution"] = d["resolution"].lower()
     lvl = str(v.get("log_level", "INFO")).upper()
     if lvl in ("DEBUG", "INFO", "WARNING", "ERROR"):
         d["log_level"] = lvl
@@ -187,6 +204,7 @@ def _find_calibration_toml(cli_path: str = "") -> str:
     for c in (
         os.path.normpath(os.path.join(toml_dir, "calibration.toml")),
         os.path.normpath(os.path.join(here, "..", "cpp", "calibration.toml")),
+        os.path.normpath(os.path.join(here, "..", "cpp_player", "calibration.toml")),
         os.path.normpath(os.path.join(here, "calibration.toml")),
     ):
         if os.path.isfile(c):
@@ -363,6 +381,288 @@ class _EquirectProjector:
 
 
 # ---------------------------------------------------------------------------
+# View menu: fisheye, rectilinear, draggable 360, realtime stitch
+# ---------------------------------------------------------------------------
+
+_FLAT_FOV = 90.0
+_VIEW_LABELS = {"fisheye": "Fisheye", "rectilinear": "Rectilinear", "360": "360"}
+
+
+class _ViewSession:
+    """Menu over the projection code that already exists.
+
+    Fisheye is the camera frame. Rectilinear and 360 call
+    ``extract_rectilinear_view``. 360 passes the drag yaw and pitch into that
+    function. Stitch starts off. While it is on, those two views use
+    ``stitch_dual_fisheye`` with the loaded calibration, then
+    ``equirect_to_rectilinear``. The lens model is fixed, so the seam does not move.
+    """
+
+    def __init__(self, lens_fov_deg: float = 195.0, calibration=None) -> None:
+        self.lens_fov = float(lens_fov_deg) if float(lens_fov_deg) > 0 else 195.0
+        self.calibration = calibration
+        self.mode = "fisheye"
+        self.stitch_enabled = False
+        self.recording = False
+        self.yaw = 0.0
+        self.pitch = 0.0
+        self.look_fov = _FLAT_FOV
+        self.estimate = None
+        self.needs_redraw = False
+        self._dragging = False
+        self._last_xy: tuple[int, int] | None = None
+        self._hits: list[tuple] = []
+        self._bar_h = 36
+        self._disp_w = 1
+        self._disp_h = 1
+        self._title = ""
+        self._render_error = ""
+        self._stitch_error = ""
+        self._rectilinear = None
+        self._equirect_view = None
+        self._center_forward = None
+        self._stitch_dual = None
+        self._mask_disc = None
+        self._load_views()
+
+    def _load_views(self) -> None:
+        root = os.path.normpath(os.path.join(_script_dir(), ".."))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            from camera_calibration.projections.fisheye_to_rectilinear import extract_rectilinear_view
+            self._rectilinear = extract_rectilinear_view
+        except Exception as e:
+            logger.error("Rectilinear projection unavailable: %s", e)
+        try:
+            from camera_calibration.projections.fisheye_to_equirectangular import (
+                mask_fisheye_circle,
+                stitch_dual_fisheye,
+            )
+            from camera_calibration.realtime.stitcher import _center_forward, equirect_to_rectilinear
+
+            self._stitch_dual = stitch_dual_fisheye
+            self._mask_disc = mask_fisheye_circle
+            self._equirect_view = equirect_to_rectilinear
+            self._center_forward = _center_forward
+        except Exception as e:
+            self._stitch_error = str(e)
+            logger.error("Calibrated stitch unavailable: %s", e)
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in _VIEW_LABELS or mode == self.mode:
+            return
+        self.mode = mode
+        self._dragging = False
+        logger.info("View: %s", _VIEW_LABELS[mode])
+        self.update_title()
+        self.needs_redraw = True
+
+    def toggle_stitch(self) -> None:
+        if not self.stitch_enabled:
+            if self.calibration is None:
+                logger.error("Stitch needs a calibration file. Pass --calibration.")
+                return
+            if self._stitch_dual is None:
+                logger.error("Calibrated stitch unavailable: %s", self._stitch_error or "import failed")
+                return
+        self.stitch_enabled = not self.stitch_enabled
+        self.estimate = None
+        logger.info("Calibrated stitch %s", "on" if self.stitch_enabled else "off")
+        self.update_title()
+        self.needs_redraw = True
+
+    def set_recording(self, recording: bool) -> None:
+        if recording == self.recording:
+            return
+        self.recording = recording
+        self.update_title()
+
+    def nudge(self, dyaw: float, dpitch: float) -> None:
+        if self.mode != "360":
+            return
+        self.yaw = (self.yaw + dyaw) % 360.0
+        self.pitch = float(min(85.0, max(-85.0, self.pitch + dpitch)))
+        self.needs_redraw = True
+
+    def update_title(self) -> None:
+        view = _VIEW_LABELS[self.mode]
+        stitch = "stitch on" if self.stitch_enabled else "stitch off"
+        if self.recording:
+            title = (
+                f"Gear360 Viewer  |  [REC]  {view}  {stitch}"
+                "  |  r: stop   s: screenshot   q: quit"
+            )
+        else:
+            extra = "   drag to look" if self.mode == "360" else ""
+            title = (
+                f"Gear360 Viewer  |  {view}  {stitch}{extra}"
+                "  |  r: record   s: screenshot   q: quit"
+            )
+        if title == self._title:
+            return
+        self._title = title
+        try:
+            cv2.setWindowTitle(_WNAME, title)
+        except cv2.error:
+            pass
+
+    def _look(self) -> tuple[float, float, float]:
+        if self.mode == "360":
+            return self.yaw, self.pitch, self.look_fov
+        return 0.0, 0.0, _FLAT_FOV
+
+    def render(self, frame: np.ndarray) -> np.ndarray:
+        """Return a frame the same size as ``frame``, without the menu bar."""
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        height, width = frame.shape[:2]
+        if self.mode == "fisheye":
+            self.estimate = None
+            return frame
+        yaw, pitch, fov = self._look()
+        try:
+            if self.stitch_enabled and self._stitch_dual is not None and self.calibration is not None:
+                half = width // 2
+                left, _left_mask = self._mask_disc(frame[:, :half])
+                right, _right_mask = self._mask_disc(frame[:, half : half * 2])
+                equirect, _lp, _rp, _overlap = self._stitch_dual(
+                    left, right, self.calibration, 180.0, width if width % 2 == 0 else width - 1,
+                    (width if width % 2 == 0 else width - 1) // 2, True,
+                )
+                equirect = self._center_forward(equirect)
+                view = self._equirect_view(equirect, width, height, fov, yaw, pitch)
+            elif self._rectilinear is not None:
+                self.estimate = None
+                view, _valid = self._rectilinear(
+                    frame, width, height, fov, yaw, pitch,
+                    self.lens_fov, self.calibration, True,
+                )
+            else:
+                self.estimate = None
+                return frame
+            self._render_error = ""
+            return view
+        except Exception as e:
+            msg = str(e)
+            if msg != self._render_error:
+                logger.error("View failed (%s): %s", self.mode, e)
+                self._render_error = msg
+            self.estimate = None
+            return frame
+
+    def paint(self, disp: np.ndarray) -> None:
+        """Draw the view menu onto the display image and record click targets."""
+        h, w = disp.shape[:2]
+        self._disp_w = max(1, w)
+        self._disp_h = max(1, h)
+        bar_h = 36 if h >= 96 else max(20, h // 4)
+        self._bar_h = bar_h
+        strip = disp[:bar_h]
+        dark = np.empty_like(strip)
+        dark[:] = (16, 16, 16)
+        cv2.addWeighted(dark, 0.78, strip, 0.22, 0, strip)
+        cv2.line(disp, (0, bar_h - 1), (w - 1, bar_h - 1), (90, 90, 90), 1)
+
+        labels = [
+            ("view", "fisheye", "Fisheye"),
+            ("view", "rectilinear", "Rectilinear"),
+            ("view", "360", "360"),
+            ("stitch", "", "Stitch: " + ("On" if self.stitch_enabled else "Off")),
+        ]
+        scale = 0.48
+        gap = 8
+        pad = 12
+        widths: list[int] = []
+        while True:
+            widths = []
+            for _kind, _value, text in labels:
+                (tw, _th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+                widths.append(tw + pad * 2)
+            if sum(widths) + gap * (len(labels) + 1) <= w or scale <= 0.34:
+                break
+            scale -= 0.04
+
+        x = gap
+        hits = []
+        for (kind, value, text), bw in zip(labels, widths):
+            if kind == "view":
+                color = (196, 122, 48) if self.mode == value else (52, 52, 52)
+            else:
+                color = (70, 150, 60) if self.stitch_enabled else (52, 52, 52)
+            y0, y1 = 5, max(6, bar_h - 6)
+            cv2.rectangle(disp, (x, y0), (x + bw, y1), color, -1)
+            cv2.rectangle(disp, (x, y0), (x + bw, y1), (20, 20, 20), 1)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+            tx = x + max(0, (bw - tw) // 2)
+            ty = y0 + max(th, (y1 - y0 + th) // 2 - 1)
+            cv2.putText(
+                disp, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (245, 245, 245), 1, cv2.LINE_AA,
+            )
+            hits.append((x, y0, x + bw, y1, kind, value))
+            x += bw + gap
+
+        hint = ""
+        if self.mode == "360":
+            hint = "drag to look"
+        elif self.stitch_enabled and self.mode == "fisheye":
+            hint = "used by Rectilinear and 360"
+        if self.stitch_enabled and self.mode != "fisheye":
+            hint = "calibration"
+        if hint:
+            (hw, hh), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+            if x + hw + 8 < w:
+                cv2.putText(
+                    disp, hint, (x + 4, (bar_h + hh) // 2 - 1),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, (220, 220, 220), 1, cv2.LINE_AA,
+                )
+        self._hits = hits
+
+    def _activate(self, x: int, y: int) -> bool:
+        for x0, y0, x1, y1, kind, value in self._hits:
+            if x0 <= x < x1 and y0 <= y < y1:
+                if kind == "view":
+                    self.set_mode(value)
+                else:
+                    self.toggle_stitch()
+                self.needs_redraw = True
+                return True
+        return False
+
+    def _drag(self, dx: float, dy: float) -> None:
+        hfov = self.look_fov
+        aspect = self._disp_h / float(self._disp_w)
+        vfov = math.degrees(2.0 * math.atan(aspect * math.tan(math.radians(hfov) * 0.5)))
+        self.yaw = (self.yaw - dx / self._disp_w * hfov) % 360.0
+        self.pitch = float(min(85.0, max(-85.0, self.pitch + dy / self._disp_h * vfov)))
+
+    def on_mouse(self, event, x, y, flags, param=None) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._dragging = False
+            if self._activate(x, y) or y < self._bar_h:
+                return
+            if self.mode == "360":
+                self._dragging = True
+                self._last_xy = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and self._dragging and self._last_xy is not None:
+            lx, ly = self._last_xy
+            dx, dy = x - lx, y - ly
+            if dx == 0 and dy == 0:
+                return
+            self._last_xy = (x, y)
+            self._drag(dx, dy)
+            self.needs_redraw = True
+        elif event == cv2.EVENT_LBUTTONUP:
+            self._dragging = False
+            self._last_xy = None
+        elif event == cv2.EVENT_MOUSEWHEEL and self.mode == "360":
+            step = -4.0 if flags > 0 else 4.0
+            self.look_fov = float(min(140.0, max(40.0, self.look_fov + step)))
+            self.needs_redraw = True
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -432,6 +732,17 @@ def _looks_like_gear360(url: str) -> bool:
     return "livestream" in u or "192.168.43.1" in u
 
 
+def apply_stream_resolution(url: str, resolution: str) -> str:
+    """Select the camera's high or low live-view path. Other URLs are unchanged."""
+    path = _STREAM_PATHS.get((resolution or "").lower())
+    if not path:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    if not parts.netloc:
+        return url
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
 def _ffprobe_dims(url: str) -> tuple[int, int] | None:
     path = _find_ff("ffprobe")
     if not path:
@@ -466,7 +777,7 @@ def resolve_stream_dims(url: str, override: str = "") -> tuple[int, int]:
         except ValueError:
             logger.warning("--size %r is not WxH, ignoring.", override)
 
-    if _looks_like_gear360(url):
+    if _looks_like_gear360(url) and "livestream_low" not in url.lower():
         logger.info("Gear360 stream — using %dx%d default (--size WxH to override).", _GEAR360_W, _GEAR360_H)
         _flush_log()
         return _GEAR360_W, _GEAR360_H
@@ -644,6 +955,26 @@ def _read_frames(proc: subprocess.Popen, frame_size: int, fq: queue.Queue) -> No
         _put_frame(fq, None)
 
 
+# Printed when the live HTTP body ends mid-JPEG. The socket is already closed,
+# so these are teardown noise; the viewer opens a new connection instead.
+_FFMPEG_DROP_NOISE = (
+    "low score of",
+    "deprecated pixel format",
+    "No JPEG data found",
+    "Invalid data found when processing input",
+    "Stream ends prematurely",
+    "Error during demuxing",
+    "HTTP error 502",
+    "Server returned 5",
+    "Error opening input",
+)
+
+_RECONNECT_BASE_S = 2.0
+_RECONNECT_MAX_S = 8.0
+_STALL_BEFORE_FIRST_S = 30.0
+_STALL_AFTER_FRAMES_S = 8.0
+
+
 def _drain_stderr(proc: subprocess.Popen) -> None:
     try:
         while proc.stderr:
@@ -652,25 +983,31 @@ def _drain_stderr(proc: subprocess.Popen) -> None:
                 break
             for line in b.decode("utf-8", errors="replace").splitlines():
                 t = line.strip()
-                if t:
+                if not t:
+                    continue
+                if any(mark in t for mark in _FFMPEG_DROP_NOISE):
+                    logger.debug("ffmpeg: %s", t)
+                else:
                     logger.warning("ffmpeg: %s", t)
     except Exception:
         pass
 
 
-def run_ffmpeg_opencv(url: str, scale: float, cap_fps: int, width: int, height: int,
-                      projector: "_EquirectProjector | None" = None) -> int:
-    import numpy as np
+def _stop_ffmpeg(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
 
-    ffmpeg = _find_ff("ffmpeg")
-    if not ffmpeg:
-        logger.error("ffmpeg not found. Install FFmpeg and add its bin/ to PATH.")
-        return 1
 
-    frame_size = width * height * 3
-    logger.info("Frame size: %dx%d (BGR24)%s", width, height,
-                "  [equirect projection ON]" if projector else "")
-
+def _start_ffmpeg(ffmpeg: str, url: str, frame_size: int, popen_kw: dict):
+    """Start one decode process. A dropped Gear 360 connection cannot be resumed."""
     cmd = [
         ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
         "-analyzeduration", _FFMPEG_ANALYZE_US,
@@ -679,68 +1016,159 @@ def run_ffmpeg_opencv(url: str, scale: float, cap_fps: int, width: int, height: 
         "-an", "-c:v", "rawvideo", "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1",
     ]
     logger.debug("ffmpeg: %s", " ".join(cmd))
-
-    cv2.namedWindow(_WNAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(_WNAME, int(width * scale), int(height * scale))
-    cv2.setWindowTitle(_WNAME, _TITLE_IDLE)
-
-    kw: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "bufsize": 1024 * 1024}
-    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-    proc = subprocess.Popen(cmd, **kw)
+    proc = subprocess.Popen(cmd, **popen_kw)
     fq: queue.Queue[bytes | None] = queue.Queue(maxsize=1)
     threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
     threading.Thread(target=_read_frames, args=(proc, frame_size, fq), daemon=True).start()
+    return proc, fq
+
+
+def _handle_viewer_key(key: int, session: _ViewSession, rec: _Recorder, last_view) -> bool:
+    """Apply a window key. Return True when the user quits."""
+    if key < 0:
+        return False
+    if key in (2424832, 65361):          # left
+        session.nudge(-5.0, 0.0)
+        return False
+    if key in (2555904, 65363):          # right
+        session.nudge(5.0, 0.0)
+        return False
+    if key in (2490368, 65362):          # up
+        session.nudge(0.0, 5.0)
+        return False
+    if key in (2621440, 65364):          # down
+        session.nudge(0.0, -5.0)
+        return False
+    low = key & 0xFF
+    if low in (ord("q"), 27):
+        logger.info("Exiting.")
+        return True
+    if low == ord("1"):
+        session.set_mode("fisheye")
+    elif low == ord("2"):
+        session.set_mode("rectilinear")
+    elif low == ord("3"):
+        session.set_mode("360")
+    elif low in (ord("t"), ord("T")):
+        session.toggle_stitch()
+    elif low in (ord("r"), ord("R")):
+        if rec.is_recording:
+            rec.stop()
+        else:
+            rec.start()
+        session.set_recording(rec.is_recording)
+    elif low in (ord("s"), ord("S")) and last_view is not None:
+        _save_screenshot(last_view)
+    return False
+
+
+def _present(session: _ViewSession, source: np.ndarray, scale: float,
+             rec: _Recorder, write: bool) -> np.ndarray:
+    """Project, optionally record, draw the menu, and show the frame."""
+    view = session.render(source)
+    if write and rec.is_recording:
+        rec.write(view if view.flags.writeable else view.copy())
+    fh, fw = view.shape[:2]
+    if scale != 1.0:
+        disp = cv2.resize(view, (max(1, int(fw * scale)), max(1, int(fh * scale))))
+    else:
+        disp = view.copy()
+    session.paint(disp)
+    cv2.imshow(_WNAME, disp)
+    session.needs_redraw = False
+    return view
+
+
+def _open_viewer_window(width: int, height: int, scale: float, session: _ViewSession) -> None:
+    cv2.namedWindow(_WNAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(_WNAME, max(1, int(width * scale)), max(1, int(height * scale)))
+    cv2.setMouseCallback(_WNAME, session.on_mouse)
+    session.update_title()
+
+
+def run_ffmpeg_opencv(url: str, scale: float, cap_fps: int, width: int, height: int,
+                      session: _ViewSession) -> int:
+    ffmpeg = _find_ff("ffmpeg")
+    if not ffmpeg:
+        logger.error("ffmpeg not found. Install FFmpeg and add its bin/ to PATH.")
+        return 1
+
+    frame_size = width * height * 3
+    logger.info("Frame size: %dx%d (BGR24)  view=%s  stitch=%s", width, height,
+                session.mode, "on" if session.stitch_enabled else "off")
+
+    _open_viewer_window(width, height, scale, session)
+
+    popen_kw: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "bufsize": 1024 * 1024}
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    proc, fq = _start_ffmpeg(ffmpeg, url, frame_size, popen_kw)
     logger.info("Decoding… first frame may take a few seconds.")
 
     rec = _Recorder(width, height, cap_fps)
-    last_frame: np.ndarray | None = None
+    last_raw: np.ndarray | None = None
+    last_view: np.ndarray | None = None
     fc, t0 = 0, time.time()
     last_log, last_fc, stall = t0, 0, 0.0
+    drops = 0
+    waiting_for_frame = True
+
+    def _reconnect() -> bool:
+        """Open a new connection. Return False when the user quits during the wait."""
+        nonlocal proc, fq, stall, drops, last_view, waiting_for_frame
+        _stop_ffmpeg(proc)
+        drops += 1
+        delay = min(_RECONNECT_MAX_S, _RECONNECT_BASE_S * drops)
+        logger.warning("Stream dropped; reconnecting in %.0fs. Press q to quit.", delay)
+        try:
+            cv2.setWindowTitle(_WNAME, "Gear360 Viewer  |  reconnecting…  |  q: quit")
+        except cv2.error:
+            pass
+        session._title = ""
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            if _handle_viewer_key(cv2.waitKeyEx(30), session, rec, last_view):
+                return False
+            if session.needs_redraw and last_raw is not None:
+                last_view = _present(session, last_raw, scale, rec, write=False)
+        proc, fq = _start_ffmpeg(ffmpeg, url, frame_size, popen_kw)
+        stall = 0.0
+        waiting_for_frame = True
+        session._title = ""
+        session.update_title()
+        logger.info("Reconnecting to %s", url)
+        return True
 
     try:
         while True:
-            k = cv2.waitKey(1) & 0xFF
-            if k in (ord("q"), 27):
-                logger.info("Exiting.")
+            if _handle_viewer_key(cv2.waitKeyEx(1), session, rec, last_view):
                 break
-            if k in (ord("r"), ord("R")):
-                if rec.is_recording:
-                    rec.stop()
-                    cv2.setWindowTitle(_WNAME, _TITLE_IDLE)
-                else:
-                    if rec.start():
-                        cv2.setWindowTitle(_WNAME, _TITLE_REC)
-            if k in (ord("s"), ord("S")) and last_frame is not None:
-                _save_screenshot(last_frame)
 
             try:
                 raw = fq.get(timeout=0.04)
             except queue.Empty:
+                if session.needs_redraw and last_raw is not None:
+                    last_view = _present(session, last_raw, scale, rec, write=False)
                 stall += 0.04
-                if proc.poll() is not None:
-                    msg = "FFmpeg exited with no frame." if fc == 0 else f"Stream ended (exit {proc.returncode})."
-                    logger.error(msg)
-                    break
-                if stall > 30 and fc == 0:
-                    logger.error("No video for 30s — check relay and camera live-view mode.")
-                    break
+                limit = _STALL_BEFORE_FIRST_S if waiting_for_frame else _STALL_AFTER_FRAMES_S
+                stalled = stall > limit
+                if proc.poll() is not None or stalled:
+                    if stalled and proc.poll() is None and waiting_for_frame:
+                        logger.warning("No video yet — check relay and camera live-view mode.")
+                    if not _reconnect():
+                        break
                 continue
             stall = 0.0
             if raw is None:
-                if fc == 0:
-                    logger.error("Stream ended before first frame.")
-                break
+                if not _reconnect():
+                    break
+                continue
+            drops = 0
+            waiting_for_frame = False
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
-            if projector is not None:
-                frame = projector.project(frame)
-            last_frame = frame
-            if rec.is_recording:
-                rec.write(frame)
-            fh, fw = frame.shape[:2]
-            disp = cv2.resize(frame, (int(fw * scale), int(fh * scale))) if scale != 1.0 else frame
-            cv2.imshow(_WNAME, disp)
+            last_raw = frame
+            last_view = _present(session, frame, scale, rec, write=True)
             fc += 1
             if fc == 1:
                 logger.info("First frame after %.1fs.", time.time() - t0)
@@ -821,8 +1249,13 @@ def main() -> int:
     )
     ap.add_argument("url", nargs="?", default=None,
                     help="Stream URL (default: [stream] in viewer.toml).")
+    ap.add_argument("--resolution", default=None, choices=("high", "low"),
+                    help="Camera live-view quality. The Gear 360 only serves these two "
+                         "streams (livestream_high.avi / livestream_low.avi), not a custom WxH. "
+                         f"(config: {cfg['resolution'] or 'url path'})")
     ap.add_argument("--size", default=None, metavar="WxH",
-                    help=f"Force frame size e.g. 1280x640; skips ffprobe. (config: {cfg['size'] or 'auto'})")
+                    help=f"Decoder frame size e.g. 1280x640; skips ffprobe. Does not change "
+                         f"what the camera sends. (config: {cfg['size'] or 'auto'})")
     ap.add_argument("--scale", type=float, default=None,
                     help=f"Window scale factor. (config: {cfg['scale']})")
     ap.add_argument("--fps", type=int, default=None,
@@ -845,10 +1278,9 @@ def main() -> int:
     ap.add_argument("--ignore-stream-check", default=None, action="store_true",
                     help=f"Skip pre-flight HEAD check. (config: {cfg['ignore_stream_check']})")
     ap.add_argument("--equirect", action="store_true", default=False,
-                    help="Project dual-fisheye to equirectangular using --calibration. "
-                         "Requires a calibration file.")
+                    help="Start in the draggable 360 view.")
     ap.add_argument("--fov", type=float, default=195.0,
-                    help="Physical lens FOV in degrees used for equirect projection (default: 195).")
+                    help="Lens field of view in degrees for the projection and realtime stitch (default: 195).")
 
     a = ap.parse_args()
 
@@ -859,6 +1291,7 @@ def main() -> int:
             setattr(a, attr, cfg[k])
 
     _cli("size");            _cli("scale");           _cli("fps")
+    _cli("resolution")
     _cli("calibration");     _cli("log_file");        _cli("log_level")
     _cli("ffplay");          _cli("gstreamer");        _cli("ffmpeg_opencv")
     _cli("force_opencv", "opencv");  _cli("ignore_stream_check")
@@ -870,6 +1303,9 @@ def main() -> int:
         a.url = default_stream_url()
         vpath = _find_viewer_toml()
         logger.info("Stream URL from %s: %s", vpath or "default", a.url)
+    if a.resolution:
+        a.url = apply_stream_resolution(a.url, a.resolution)
+        logger.info("Camera stream resolution: %s → %s", a.resolution, a.url)
     vcfg = load_viewer_toml_config()
     if vcfg:
         logger.info("viewer.toml: %s", vcfg["toml_path"])
@@ -904,9 +1340,21 @@ def main() -> int:
     else:
         logger.debug("No calibration file found (use --calibration <path> or set in viewer.toml)")
 
-    if a.equirect and camera_calib is None:
-        logger.error("--equirect requires a calibration file. Use --calibration <path>.")
-        return 1
+    lens_fov = float(a.fov) if float(a.fov) > 0 else 195.0
+    if camera_calib is not None:
+        try:
+            cal_fov = min(float(camera_calib.lens1.fov), float(camera_calib.lens2.fov))
+            if cal_fov > 0:
+                lens_fov = cal_fov
+        except (TypeError, ValueError, AttributeError):
+            pass
+    session = _ViewSession(lens_fov, camera_calib)
+    if a.equirect:
+        session.set_mode("360")
+    logger.info(
+        "Lens FOV %.1f°. Menu: Fisheye, Rectilinear, 360. Stitch starts off.",
+        lens_fov,
+    )
 
     # Stream check (HEAD — does not touch the camera connection)
     ok, msg = check_stream_url(a.url)
@@ -932,12 +1380,7 @@ def main() -> int:
     if use_pipe:
         logger.info("Backend: FFmpeg pipe → OpenCV  (--opencv for direct capture, --ffplay for external).")
         w, h = resolve_stream_dims(a.url, a.size)
-        proj = None
-        if a.equirect and camera_calib is not None:
-            logger.info("Building equirect projection maps (one-time, may take a few seconds)…")
-            proj = _EquirectProjector(camera_calib, w, h, a.fov)
-            logger.info("Projection maps ready.")
-        return run_ffmpeg_opencv(a.url, a.scale, a.fps, w, h, projector=proj)
+        return run_ffmpeg_opencv(a.url, a.scale, a.fps, w, h, session)
 
     # --- GStreamer ---
     if a.gstreamer:
@@ -978,15 +1421,9 @@ def main() -> int:
         return 1
     w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or _GEAR360_W
     h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or _GEAR360_H
-    proj = None
-    if a.equirect and camera_calib is not None:
-        logger.info("Building equirect projection maps…")
-        proj = _EquirectProjector(camera_calib, w, h, a.fov)
-    sw = int(w * a.scale); sh = int(h * a.scale)
-    cv2.namedWindow(_WNAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(_WNAME, sw, sh)
-    cv2.setWindowTitle(_WNAME, _TITLE_IDLE)
+    _open_viewer_window(w, h, a.scale, session)
     rec = _Recorder(w, h, a.fps)
+    last_view = None
     fc, t0, lt, lfc = 0, time.time(), time.time(), 0
     try:
         while True:
@@ -994,24 +1431,9 @@ def main() -> int:
             if not ok or fr is None:
                 break
             fc += 1
-            if proj is not None:
-                fr = proj.project(fr)
-            if rec.is_recording:
-                rec.write(fr)
-            fh, fw = fr.shape[:2]
-            cv2.imshow(_WNAME, fr if a.scale == 1.0 else cv2.resize(fr, (int(fw * a.scale), int(fh * a.scale))))
-            k = cv2.waitKey(1) & 0xFF
-            if k in (ord("q"), 27):
+            last_view = _present(session, fr, a.scale, rec, write=True)
+            if _handle_viewer_key(cv2.waitKeyEx(1), session, rec, last_view):
                 break
-            if k in (ord("r"), ord("R")):
-                if rec.is_recording:
-                    rec.stop()
-                    cv2.setWindowTitle(_WNAME, _TITLE_IDLE)
-                else:
-                    if rec.start():
-                        cv2.setWindowTitle(_WNAME, _TITLE_REC)
-            if k in (ord("s"), ord("S")):
-                _save_screenshot(fr)
             if a.fps > 0:
                 time.sleep(1.0 / a.fps)
             now = time.time()

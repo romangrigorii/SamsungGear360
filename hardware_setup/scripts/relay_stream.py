@@ -10,7 +10,8 @@ Usage on Pi:
   1. Connect Pi's WiFi to the Gear 360's AP (camera in live view / streaming mode).
   2. Ensure Pi also has Ethernet (or second WiFi) on your main network.
   3. Run: python3 relay_stream.py [--port 7679] [--bind 0.0.0.0]
-  4. On your PC: open http://<PI_IP>:7679/livestream_high.avi (or use the viewer).
+  4. On your PC: open http://<PI_IP>:7679/livestream_high.avi
+     or http://<PI_IP>:7679/livestream_low.avi (or use the viewer --resolution flag).
 
 Options:
   --source-url   Camera stream URL (default: http://192.168.43.1:7679/livestream_high.avi)
@@ -31,7 +32,9 @@ import urllib.parse
 import sys
 
 CHUNK_SIZE = 64 * 1024  # 64 KB
-STREAM_PATH = "/livestream_high.avi"
+# The camera serves these two fixed live-view streams. The request path selects which one.
+LIVE_PATHS = ("/livestream_high.avi", "/livestream_low.avi")
+STREAM_PATH = LIVE_PATHS[0]
 
 
 def _relay_conf_paths():
@@ -163,6 +166,21 @@ def allowed_client(client_ip, allow_list):
     return client_ip in allow_list
 
 
+def requested_live_path(path):
+    """Return the camera live-view path this request asks for, or None."""
+    bare = (path or "").split("?", 1)[0]
+    for name in LIVE_PATHS:
+        if bare == name or bare.endswith(name):
+            return name
+    return None
+
+
+def camera_url_for(source_url, live_path):
+    """Same camera host as source_url, with the requested high/low path."""
+    parsed = urllib.parse.urlsplit(source_url)
+    return urllib.parse.urlunsplit((parsed.scheme or "http", parsed.netloc, live_path, "", ""))
+
+
 def handle_request(conn, source_url, allow_list):
     """Handle one HTTP request: proxy GET for the stream path to the camera."""
     client_addr = conn.getpeername()
@@ -201,13 +219,14 @@ def handle_request(conn, source_url, allow_list):
     path = parts[1] if len(parts) >= 2 else ""
 
     method_u = method.upper()
-    if method_u not in ("GET", "HEAD") or STREAM_PATH not in path:
+    live_path = requested_live_path(path)
+    if method_u not in ("GET", "HEAD") or live_path is None:
         try:
             conn.sendall(
                 b"HTTP/1.1 404 Not Found\r\n"
                 b"Content-Type: text/plain\r\n"
                 b"Connection: close\r\n\r\nNot Found. Use GET "
-                + STREAM_PATH.encode()
+                + b" or ".join(p.encode() for p in LIVE_PATHS)
                 + b"\n"
             )
         except Exception:
@@ -226,7 +245,7 @@ def handle_request(conn, source_url, allow_list):
                 b"Content-Type: video/x-msvideo\r\n"
                 b"Cache-Control: no-cache\r\n"
                 b"Connection: close\r\n"
-                b"X-Relay-Version: 3\r\n"
+                b"X-Relay-Version: 4\r\n"
                 b"\r\n"
             )
         except Exception:
@@ -236,10 +255,13 @@ def handle_request(conn, source_url, allow_list):
 
     # Open upstream stream to camera (short timeout so we fail fast and return 502 to client).
     # Set Host and User-Agent so the camera accepts the request (it can return 400 otherwise).
+    # The client path selects high vs low; both are fetched from the camera host in source_url.
+    upstream_url = camera_url_for(source_url, live_path)
+    logging.info("Client %s requested %s", client_ip, upstream_url)
     try:
-        parsed = urllib.parse.urlparse(source_url)
+        parsed = urllib.parse.urlparse(upstream_url)
         host_header = parsed.netloc or "192.168.43.1:7679"
-        req = urllib.request.Request(source_url)
+        req = urllib.request.Request(upstream_url)
         req.add_header("Host", host_header)
         req.add_header("User-Agent", "Samsung Gear 360 Manager/1.0")
         upstream = urllib.request.urlopen(req, timeout=4)
@@ -293,7 +315,7 @@ def handle_request(conn, source_url, allow_list):
             conn.sendall(("%s: %s\r\n" % (name, value)).encode())
         conn.sendall(b"Connection: close\r\n")
         conn.sendall(
-            b"X-Relay-Version: 3\r\n"
+            b"X-Relay-Version: 4\r\n"
         )  # so you can curl -I and confirm updated relay is running
         conn.sendall(b"\r\n")
 
@@ -337,12 +359,14 @@ def main():
     server.listen(8)
 
     logging.info("Gear 360 stream relay starting")
-    logging.info("Source: %s", args.source_url)
+    logging.info("Camera host: %s", urllib.parse.urlsplit(args.source_url).netloc)
     listen_host = args.bind if args.bind != "0.0.0.0" else "<all>"
-    logging.info("Listen: http://%s:%s%s", listen_host, args.port, STREAM_PATH)
+    for live_path in LIVE_PATHS:
+        logging.info("Listen: http://%s:%s%s", listen_host, args.port, live_path)
     if allow_list:
         logging.info("Allowed IPs: %s", ", ".join(allow_list))
     logging.info("On your PC, open: http://<PI_IP>:%s%s", args.port, STREAM_PATH)
+    logging.info("Low stream:       http://<PI_IP>:%s%s", args.port, LIVE_PATHS[1])
     logging.info("Press Ctrl+C to stop.")
 
     while True:

@@ -1,6 +1,6 @@
 # Samsung Gear 360 — Python Tools
 
-Run all commands from the `python/` directory.
+Viewer commands run from `python_player/`. Calibration commands run from the repo root.
 
 ---
 
@@ -15,25 +15,39 @@ python gear360_viewer.py http://10.0.0.210:7679/livestream_high.avi
 
 | Key | Action |
 |-----|--------|
+| `1` / `2` / `3` | Fisheye, rectilinear, or 360 (same as the top bar) |
+| drag / scroll | In 360 only: look around, change field of view |
+| `t` | Stitch on or off. Off by default. Needs `--calibration` |
 | `r` | Start recording — title bar changes to `[REC]` |
 | `r` (again) | Stop recording — file is saved |
 | `s` | Screenshot of the current frame |
 | `q` / ESC | Quit (stops any active recording) |
 
-Recordings and screenshots are saved to `python/saved_files/` with names like  
+Stitch uses the calibration file on every frame (`stitch_dual_fisheye`), so the seam does not drift. Rectilinear stays looking forward. 360 feeds yaw and pitch from the mouse into the same projection.
+
+Recordings and screenshots are saved to `python_player/saved_files/` with names like  
 `gear360_20260427_183052.mp4` / `.png` — timestamped at the moment of completion.
 
 **Useful flags:**
 
 ```powershell
---size 1280x640        # skip ffprobe, set frame size explicitly
+--resolution low       # camera stream: high (default) or low
+--size 1280x640        # decoder frame size; does not change the camera
 --scale 0.5            # display at half resolution
 --calibration path     # load calibration.toml
 --ignore-stream-check  # skip the pre-flight HEAD check
 --ffplay               # use external ffplay window instead
 ```
 
-All flags can also be set permanently in `python/viewer.toml`.
+All flags can also be set permanently in `python_player/viewer.toml`.
+
+To write a stitched file instead of viewing live:
+
+```powershell
+python camera_calibration/realtime/stitcher.py clip.mp4 --calibration calibration.toml --output_format 360 -o clip_360.mp4
+```
+
+`rectalinear` writes the flat view. Details are in `camera_calibration/README.md`.
 
 ---
 

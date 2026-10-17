@@ -11,7 +11,8 @@ path = "/livestream_high.avi"
 # Display
 scale     = 1.0        # window scale factor (e.g. 0.5 for half-size)
 fps       = 0          # cap display rate Hz; 0 = uncapped (lowest latency)
-size      = ""         # force frame size "WxH" e.g. "1280x640"; empty = auto-detect
+size       = ""         # decoder frame size "WxH" e.g. "1280x640"; empty = auto. Does not change the camera.
+resolution = ""        # high | low. Selects livestream_high.avi or livestream_low.avi. Empty keeps [stream] path.
 log_level = "INFO"     # DEBUG | INFO | WARNING | ERROR
 log_file  = ""         # write log to this file (empty = stderr only)
 

@@ -28,7 +28,7 @@ Run `gear360_viewer --help` for the same summary.
 | `--rectilinear` | OpenGL: spherical-to-flat rectilinear view. |
 | `--equirectangular` | OpenGL: dual fisheye to equirectangular (360°) view. |
 | `--fov <degrees>` | Field of view for `--rectilinear` / `--equirectangular` (must be `0 < fov ≤ 360`). If you enable either mode and omit `--fov`, the default is **195**. |
-| `--stitch` | Stitch mode for equirectangular projection (use with `--equirectangular`). |
+| `--stitch` | OpenGL stitch for equirectangular projection (use with `--equirectangular`). The Python viewer’s Stitch control is separate: it uses a calibration TOML and does not re-estimate the seam each frame. |
 | `--calibration <file>` | Load lens calibration from a TOML file. If `--rectilinear` / `--equirectangular` are not set, equirectangular mode is turned on automatically when calibration loads successfully. |
 | `--light-falloff` | Enable lens light falloff compensation in the shader. |
 
